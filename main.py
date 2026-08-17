@@ -408,14 +408,13 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "prediction_metadata": {"threshold": ANOMALY_THRESHOLD, "score": anomaly_score, "deployment_id": DATAROBOT_DEPLOYMENT_ID},
         "created_at": created_at,
     })
-
-    # 5. حفظ نتيجة تقييم المخاطر
+# 5. حفظ نتيجة تقييم المخاطر
     risk_row = append_row("risk_results", {
         "id": str(uuid.uuid4()),
         "incident_id": incident_id,
         "risk_score": risk_score,
         "severity": severity.upper(),
-        "scoring_mode": "datarobot_assisted",
+        "scoring_mode": "ml_assisted",  # مطابقة دقيقة لقيد الـ Check Constraint
         "flow": "full_path",
         "priority": priority,
         "sla_hours": sla,
