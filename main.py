@@ -162,7 +162,6 @@ def now_iso() -> str:
 # Twilio Multi-Alerting System (Sends Real Structured Incident Data)
 # ---------------------------------------------------------------------------
 def notify_team_twilio(incident_id: str, severity: str, title: str, incident_type: str, risk_score: float):
-    """إرسال تفاصيل الحادثة الحقيقية عبر SMS و WhatsApp لفريق العمل عند رصد خطر CRITICAL"""
     if severity.upper() == "CRITICAL":
         sid = os.environ.get("TWILIO_SID")
         token = os.environ.get("TWILIO_TOKEN")
@@ -172,31 +171,17 @@ def notify_team_twilio(incident_id: str, severity: str, title: str, incident_typ
         if sid and token and from_num:
             try:
                 client = Client(sid, token)
-                
-                # نص الرسالة المرتب والمنظم بالبيانات الحقيقية
-                msg_body = (
-                    f"🚨 [SentriX Critical Alert] 🚨\n\n"
-                    f"Incident: {title}\n"
-                    f"Risk Score: {risk_score} / 100\n"
-                    f"Type: {incident_type}\n"
-                    f"ID: {incident_id[:8]}\n\n"
-                    f"Status: Critical Impact Detected\n"
-                    f"Action: Immediate Isolation Required"
-                )
+                # رسالة مبسطة جداً لتجنب أخطاء الـ Template في الحساب التجريبي
+                msg_body = f"SentriX ALERT: Critical {incident_type} detected. Risk: {risk_score}/100. ID: {incident_id[:8]}"
                 
                 for num in team_nums:
                     clean_num = num.strip()
                     if clean_num:
-                        # 1. إرسال SMS
+                        # إرسال SMS فقط للتجربة (واتساب قد يحتاج تفعيل إضافي في Twilio)
                         client.messages.create(body=msg_body, from_=from_num, to=clean_num)
-                        print(f"✅ SMS alert sent to {clean_num}")
-                        
-                        # 2. إرسال WhatsApp
-                        client.messages.create(body=msg_body, from_=f"whatsapp:{from_num}", to=f"whatsapp:{clean_num}")
-                        print(f"✅ WhatsApp alert sent to {clean_num}")
+                        print(f"✅ Alert sent to {clean_num}")
             except Exception as e:
                 print(f"⚠️ Twilio alert error: {e}")
-
 # ---------------------------------------------------------------------------
 # Request Models
 # ---------------------------------------------------------------------------
