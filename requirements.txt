@@ -6,3 +6,4 @@ python-multipart==0.0.9
 pydantic==2.9.2
 requests==2.32.3
 supabase>=2.0.0
+twilio>=9.0.0
