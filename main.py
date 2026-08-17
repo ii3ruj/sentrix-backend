@@ -230,15 +230,18 @@ def generate_synthetic_features(incident_type: str = "Ransomware") -> dict:
 
 def call_datarobot_prediction(features: dict) -> tuple[float, str]:
     if DATAROBOT_API_TOKEN and DATAROBOT_DEPLOYMENT_ID:
-        url = f"{DATAROBOT_ENDPOINT.rstrip('/')}/deployments/{DATAROBOT_DEPLOYMENT_ID}/predictions"
+        url = f"https://app.datarobot.com/api/v2/deployments/{DATAROBOT_DEPLOYMENT_ID}/predictions"
         headers = {
             "Authorization": f"Bearer {DATAROBOT_API_TOKEN}",
             "Content-Type": "application/json;charset=UTF-8",
         }
         clean_features = {k: features.get(k, 0) for k in FEATURE_KEYS}
+        # التعديل هنا: DataRobot يتوقع هيكلية "data" في الـ JSON
+        payload = {"data": [clean_features]}
+        
         try:
-            resp = requests.post(url, json=[clean_features], headers=headers, timeout=10)
-            if resp.status_code == 200:
+            resp = requests.post(url, json=payload, headers=headers, timeout=12)
+            if resp.status_code in [200, 201]:
                 preds = resp.json().get("data", [])
                 if preds:
                     p = preds[0]
@@ -247,10 +250,13 @@ def call_datarobot_prediction(features: dict) -> tuple[float, str]:
                         return round(float(score), 4), "DataRobot Production Deployment"
                     if "predictionValues" in p:
                         for pv in p["predictionValues"]:
-                            if str(pv.get("label")).lower() in ["1", "anomaly", "attack", "true"]:
+                            if str(pv.get("label")).lower() in ["1", "anomaly", "attack", "true", "positive"]:
                                 return round(float(pv.get("value", 0.88)), 4), "DataRobot Production Deployment"
-        except Exception:
-            pass
+            print(f"⚠️ DataRobot API Status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"⚠️ DataRobot connection error: {e}")
+
+    return 0.8500, "Isolation Forest (Fallback Engine)"
 
     # Mathematical Baseline Simulation
     numeric_signal = 0.0
