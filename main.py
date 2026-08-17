@@ -1,7 +1,7 @@
 """
-SentriX Backend API & Real-Time AI Decision Engine (v3.2 - Final Production)
------------------------------------------------------------------------------
-Fully Integrated with DataRobot Prediction API, Supabase PostgreSQL, & PDF Archiving.
+SentriX Backend API & Real-Time AI Decision Engine (v3.3 - Production with Twilio Alerts)
+-----------------------------------------------------------------------------------------
+Fully Integrated with DataRobot Prediction API, Supabase PostgreSQL, PDF Archiving, & Twilio Alerts.
 """
 
 import asyncio
@@ -14,16 +14,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pdfplumber
 import requests
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from twilio.rest import Client
 
 # ---------------------------------------------------------------------------
 # DataRobot & Supabase Environment Configuration
@@ -54,7 +52,7 @@ DB_DIR = STORAGE_DIR / "db"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SentriX AI Decision Engine", version="3.2.0")
+app = FastAPI(title="SentriX AI Decision Engine", version="3.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -161,6 +159,35 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 # ---------------------------------------------------------------------------
+# Twilio Multi-Alerting System (SMS + WhatsApp)
+# ---------------------------------------------------------------------------
+def notify_team_twilio(incident_id: str, severity: str, title: str):
+    """إرسال تنبيه فوري عبر SMS و WhatsApp لفريق العمل عندما تكون الحادثة CRITICAL"""
+    if severity.upper() == "CRITICAL":
+        sid = os.environ.get("TWILIO_SID")
+        token = os.environ.get("TWILIO_TOKEN")
+        from_num = os.environ.get("TWILIO_PHONE")
+        team_nums = os.environ.get("TEAM_NUMBERS", "").split(",")
+        
+        if sid and token and from_num:
+            try:
+                client = Client(sid, token)
+                msg_body = f"🚨 SentriX CRITICAL ALERT: {title} (ID: {incident_id[:8]})"
+                
+                for num in team_nums:
+                    clean_num = num.strip()
+                    if clean_num:
+                        # 1. إرسال SMS
+                        client.messages.create(body=msg_body, from_=from_num, to=clean_num)
+                        print(f"✅ SMS alert sent to {clean_num}")
+                        
+                        # 2. إرسال WhatsApp
+                        client.messages.create(body=msg_body, from_=f"whatsapp:{from_num}", to=f"whatsapp:{clean_num}")
+                        print(f"✅ WhatsApp alert sent to {clean_num}")
+            except Exception as e:
+                print(f"⚠️ Twilio alert error: {e}")
+
+# ---------------------------------------------------------------------------
 # Request Models
 # ---------------------------------------------------------------------------
 class IncidentIn(BaseModel):
@@ -236,7 +263,6 @@ def call_datarobot_prediction(features: dict) -> tuple[float, str]:
             "Content-Type": "application/json;charset=UTF-8",
         }
         clean_features = {k: features.get(k, 0) for k in FEATURE_KEYS}
-        # التعديل هنا: DataRobot يتوقع هيكلية "data" في الـ JSON
         payload = {"data": [clean_features]}
         
         try:
@@ -257,22 +283,6 @@ def call_datarobot_prediction(features: dict) -> tuple[float, str]:
             print(f"⚠️ DataRobot connection error: {e}")
 
     return 0.8500, "Isolation Forest (Fallback Engine)"
-
-    # Mathematical Baseline Simulation
-    numeric_signal = 0.0
-    count = 0
-    reference = {
-        "Flow Duration": 500000, "Flow Bytes/s": 2000, "Flow Packets/s": 50,
-        "Total Fwd Packets": 20, "Total Backward Packets": 20, "SYN Flag Count": 1,
-    }
-    for key, baseline in reference.items():
-        val = features.get(key)
-        if isinstance(val, (int, float)) and baseline:
-            numeric_signal += min(abs(val - baseline) / baseline, 5.0)
-            count += 1
-    avg_dev = numeric_signal / count if count else 0.0
-    score = 1 / (1 + math.exp(-(avg_dev - 1.2)))
-    return round(min(max(score, 0.0), 1.0), 4), "Isolation Forest (DataRobot Architecture)"
 
 def calculate_incident_risk(anomaly_score, asset_criticality, vulnerability_level, business_impact):
     crit_map = {"low": 10, "medium": 25, "high": 40, "critical": 50}
@@ -361,15 +371,15 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
     exp_level = (payload.exposure or "internal").lower()
     input_meth = "server" if payload.source in ["server", "live", "generated"] else ("pdf" if payload.source == "pdf" else "manual")
 
-    # 1. تمرير البيانات على مودل الـ AI / DataRobot
     features_to_eval = payload.flow_features if flow_features_complete(payload.flow_features) else generate_synthetic_features(payload.incident_type)
     anomaly_score, model_source = call_datarobot_prediction(features_to_eval)
     is_anomaly = anomaly_score >= ANOMALY_THRESHOLD
     
-    # 2. حساب مؤشرات الخطورة بحروف كبيرة مطابقة للـ Check Constraints
     risk_score, severity_upper, priority, sla = calculate_incident_risk(anomaly_score, asset_crit, vuln_level, biz_impact)
 
-    # 3. إدخال الحادثة الأساسية
+    # 🚨 استدعاء نظام التنبيهات الفورية (SMS + WhatsApp) إذا كانت الحادثة حرجة
+    notify_team_twilio(incident_id, severity_upper, payload.title)
+
     incident_row = {
         "id": incident_id,
         "title": payload.title,
@@ -379,7 +389,7 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "destination_ip": payload.destination_ip or f"10.0.{random.randint(1, 10)}.{random.randint(10, 250)}",
         "asset_type": payload.asset_type,
         "asset_criticality": asset_crit,
-        "severity": severity_upper,  # CRITICAL, HIGH, MEDIUM, LOW
+        "severity": severity_upper,
         "status": "Open",
         "input_method": input_meth,
         "exposure": exp_level,
@@ -392,19 +402,17 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
     }
     append_row("incidents", incident_row)
 
-    # 4. إدخال نتيجة الـ AI
     ai_result = append_row("ai_results", {
         "id": str(uuid.uuid4()),
         "incident_id": incident_id,
         "anomaly_score": anomaly_score,
         "is_anomaly": is_anomaly,
         "model_name": model_source,
-        "model_version": "v3.2",
+        "model_version": "v3.3",
         "prediction_metadata": {"threshold": ANOMALY_THRESHOLD, "score": anomaly_score, "features_count": len(features_to_eval)},
         "created_at": created_at,
     })
 
-    # 5. إدخال نتيجة المخاطر (مطابقة لـ scoring_mode_check)
     risk_row = append_row("risk_results", {
         "id": str(uuid.uuid4()),
         "incident_id": incident_id,
@@ -417,7 +425,6 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "created_at": created_at,
     })
 
-    # 6. تحليل التهديدات وتكتيكات MITRE
     threat = threat_agent(payload.incident_type, severity_upper)
     threat_row = append_row("threat_analysis", {
         "id": str(uuid.uuid4()),
@@ -426,7 +433,6 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "created_at": created_at,
     })
 
-    # 7. التوصيات والـ Playbooks
     recs = recommendation_agent(payload.incident_type)
     for idx, rec in enumerate(recs):
         append_row("incident_recommendations", {
@@ -441,7 +447,6 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
             "created_at": created_at,
         })
 
-    # 8. سرد وتفسير الذكاء الاصطناعي (AI Narrative)
     narrative_text = (
         f"Incident {payload.title} classified as {severity_upper} (Risk Score: {risk_score}/100, Priority: {priority}). "
         f"AI Anomaly Score: {anomaly_score} ({model_source}). Matched Technique: {threat['mitre_techniques'][0]} "
@@ -475,18 +480,16 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "sla_hours": sla,
     }
 
-    # 9. توليد وحفظ الـ PDF والأرشفة المشفرة SHA-256
     pdf_bytes = render_pdf_bytes(package)
     pdf_hash = sha256_of_bytes(pdf_bytes)
     
-    # حفظ الملف محلياً لتنزيله فوراً
     (FILES_DIR / f"{incident_id}.pdf").write_bytes(pdf_bytes)
 
     report_row = append_row("incident_reports", {
         "id": str(uuid.uuid4()),
         "incident_id": incident_id,
         "report_json": package,
-        "report_version": "v3.2",
+        "report_version": "v3.3",
         "generated_at": created_at,
         "created_at": created_at,
     })
@@ -580,7 +583,7 @@ async def startup_event():
     asyncio.create_task(continuous_incident_generator())
 
 # ---------------------------------------------------------------------------
-# API Endpoints (Matched with Frontend React expectations)
+# API Endpoints
 # ---------------------------------------------------------------------------
 @app.post("/api/incidents")
 async def create_incident(payload: IncidentIn):
@@ -592,7 +595,6 @@ async def list_incidents():
     ai_results = {r.get("incident_id"): r for r in load_table("ai_results")}
     risk_results = {r.get("incident_id"): r for r in load_table("risk_results")}
     
-    # دمج بيانات الـ AI والمخاطر لكل حادثة لتظهر في جدول الويب مباشرة
     enhanced_list = []
     for inc in incidents:
         inc_id = inc.get("id")
@@ -703,9 +705,10 @@ async def health():
         "status": "ok",
         "time": now_iso(),
         "database": "supabase" if supabase else "local_fallback",
-        "ai_engine": "DataRobot Live Deployment"
+        "ai_engine": "DataRobot Live Deployment",
+        "twilio_alerts": "Active"
     }
 
 @app.get("/")
 async def root():
-    return {"service": "SentriX DataRobot AI Engine", "status": "active", "version": "3.2.0"}
+    return {"service": "SentriX DataRobot AI Engine", "status": "active", "version": "3.3.0"}
