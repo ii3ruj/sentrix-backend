@@ -1,7 +1,7 @@
 """
-SentriX Backend API & Real-Time AI Decision Engine (v3.3 - Production with Twilio Alerts)
------------------------------------------------------------------------------------------
-Fully Integrated with DataRobot Prediction API, Supabase PostgreSQL, PDF Archiving, & Twilio Alerts.
+SentriX Backend API & Real-Time AI Decision Engine (v3.4 - Production with Live Twilio Alerts)
+---------------------------------------------------------------------------------------------
+Fully Integrated with DataRobot Prediction API, Supabase PostgreSQL, PDF Archiving, & Real Twilio SMS/WhatsApp Alerts.
 """
 
 import asyncio
@@ -52,7 +52,7 @@ DB_DIR = STORAGE_DIR / "db"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SentriX AI Decision Engine", version="3.3.0")
+app = FastAPI(title="SentriX AI Decision Engine", version="3.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -159,10 +159,10 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 # ---------------------------------------------------------------------------
-# Twilio Multi-Alerting System (SMS + WhatsApp)
+# Twilio Multi-Alerting System (Sends Real Structured Incident Data)
 # ---------------------------------------------------------------------------
-def notify_team_twilio(incident_id: str, severity: str, title: str):
-    """إرسال تنبيه فوري عبر SMS و WhatsApp لفريق العمل عندما تكون الحادثة CRITICAL"""
+def notify_team_twilio(incident_id: str, severity: str, title: str, incident_type: str, risk_score: float):
+    """إرسال تفاصيل الحادثة الحقيقية عبر SMS و WhatsApp لفريق العمل عند رصد خطر CRITICAL"""
     if severity.upper() == "CRITICAL":
         sid = os.environ.get("TWILIO_SID")
         token = os.environ.get("TWILIO_TOKEN")
@@ -172,7 +172,17 @@ def notify_team_twilio(incident_id: str, severity: str, title: str):
         if sid and token and from_num:
             try:
                 client = Client(sid, token)
-                msg_body = f"🚨 SentriX CRITICAL ALERT: {title} (ID: {incident_id[:8]})"
+                
+                # نص الرسالة المرتب والمنظم بالبيانات الحقيقية
+                msg_body = (
+                    f"🚨 [SentriX Critical Alert] 🚨\n\n"
+                    f"Incident: {title}\n"
+                    f"Risk Score: {risk_score} / 100\n"
+                    f"Type: {incident_type}\n"
+                    f"ID: {incident_id[:8]}\n\n"
+                    f"Status: Critical Impact Detected\n"
+                    f"Action: Immediate Isolation Required"
+                )
                 
                 for num in team_nums:
                     clean_num = num.strip()
@@ -377,8 +387,14 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
     
     risk_score, severity_upper, priority, sla = calculate_incident_risk(anomaly_score, asset_crit, vuln_level, biz_impact)
 
-    # 🚨 استدعاء نظام التنبيهات الفورية (SMS + WhatsApp) إذا كانت الحادثة حرجة
-    notify_team_twilio(incident_id, severity_upper, payload.title)
+    # 🚨 إرسال بيانات الحادثة الحقيقية والمرتبة عبر Twilio إذا كانت CRITICAL
+    notify_team_twilio(
+        incident_id=incident_id,
+        severity=severity_upper,
+        title=payload.title,
+        incident_type=payload.incident_type,
+        risk_score=risk_score
+    )
 
     incident_row = {
         "id": incident_id,
@@ -408,7 +424,7 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "anomaly_score": anomaly_score,
         "is_anomaly": is_anomaly,
         "model_name": model_source,
-        "model_version": "v3.3",
+        "model_version": "v3.4",
         "prediction_metadata": {"threshold": ANOMALY_THRESHOLD, "score": anomaly_score, "features_count": len(features_to_eval)},
         "created_at": created_at,
     })
@@ -489,7 +505,7 @@ def process_incident(payload: IncidentIn, custom_id: str | None = None) -> dict:
         "id": str(uuid.uuid4()),
         "incident_id": incident_id,
         "report_json": package,
-        "report_version": "v3.3",
+        "report_version": "v3.4",
         "generated_at": created_at,
         "created_at": created_at,
     })
@@ -711,4 +727,4 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"service": "SentriX DataRobot AI Engine", "status": "active", "version": "3.3.0"}
+    return {"service": "SentriX DataRobot AI Engine", "status": "active", "version": "3.4.0"}
