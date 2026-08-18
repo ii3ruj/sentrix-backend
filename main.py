@@ -1275,203 +1275,80 @@ from twilio.twiml.voice_response import VoiceResponse
 
 def notify_email(pkg: dict) -> dict:
     global LAST_EMAIL
-
-    risk = pkg["risk"]
-    inc = pkg["incident"]
-
-    # Send email only for Critical incidents
-    if risk["severity"] != "Critical":
-        return {
-            "sent": False,
-            "reason": "severity_not_critical"
-        }
-
     try:
+        risk = pkg["risk"]
+        inc = pkg["incident"]
+
+        if str(risk.get("severity", "")).lower() != "critical":
+            result = {"sent": False, "reason": "severity_not_critical"}
+            LAST_EMAIL = result
+            return result
+
+        if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL and ALERT_EMAILS):
+            result = {"sent": False, "reason": "missing_config"}
+            LAST_EMAIL = result
+            return result
+
+        recipients = [{"address": email} for email in ALERT_EMAILS if email]
+        if not recipients:
+            result = {"sent": False, "reason": "no_recipients"}
+            LAST_EMAIL = result
+            return result
+
         response = requests.post(
             "https://comms.twilio.com/v1/Emails",
             auth=(TWILIO_SID, TWILIO_TOKEN),
             json={
-                "from": {
-                    "address": TWILIO_FROM_EMAIL,
-                    "name": "SentriX Security"
-                },
-                "to": [
-                    {"address": address}
-                    for address in ALERT_EMAILS
-                ],
+                "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
+                "to": recipients,
                 "content": {
-                    "subject": f"Critical Incident: {inc['id']}",
-                    "html": f"""
-                        <html>
-                            <body>
-                                <h2>SentriX Security Alert</h2>
-
-                                <p>
-                                    <b>Critical incident detected.</b>
-                                </p>
-
-                                <p>
-                                    <b>Incident ID:</b> {inc['id']}
-                                </p>
-
-                                <p>
-                                    <b>Title:</b> {inc['title']}
-                                </p>
-
-                                <p>
-                                    <b>Severity:</b> {risk['severity']}
-                                </p>
-
-                                <p>
-                                    <b>Risk Score:</b> {risk.get('risk_score', 'N/A')}
-                                </p>
-
-                                <p>
-                                    Immediate attention is required.
-                                </p>
-
-                                <br>
-
-                                <p>
-                                    <b>SentriX Security Platform</b>
-                                </p>
-                            </body>
-                        </html>
-                    """
+                    "subject": f"🚨 Critical Incident Alert — {inc['id']}",
+                    "html": f"<p>Critical incident {inc['id']} detected. Severity: {risk['severity']}</p>"
                 }
             },
-            timeout=30
+            timeout=10
         )
-
-        result = {
-            "sent": response.status_code in (200, 201, 202),
-            "status": response.status_code
-        }
-
-        # Include Twilio response if request failed
-        if not result["sent"]:
-            try:
-                result["error"] = response.json()
-            except Exception:
-                result["error"] = response.text[:300]
-
+        result = {"sent": response.status_code in (200, 201, 202), "status": response.status_code}
     except Exception as e:
-        result = {
-            "sent": False,
-            "error": str(e)[:300]
-        }
+        result = {"sent": False, "error": str(e)[:200]}
 
     LAST_EMAIL = result
     return result
 
 
-def notify_twilio(
-    ref: str,
-    severity: str,
-    incident_type: str,
-    risk_score: int
-) -> dict:
-
+def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
     global LAST_TWILIO
-
-    # Send SMS + Voice only for Critical incidents
-    if severity != "Critical":
-        return {
-            "sent": False,
-            "reason": "severity_not_critical"
-        }
-
-    client = Client(TWILIO_SID, TWILIO_TOKEN)
-
-    target_phones = TEAM_NUMBERS or []
-
-    results = []
-
-    # -----------------------------------------------------------------------
-    # 1. SMS ALERT
-    # -----------------------------------------------------------------------
-
     try:
-        sms_message = (
-            f"SentriX Security Alert: "
-            f"Critical {incident_type} incident detected. "
-            f"Incident ID: {ref}. "
-            f"Risk Score: {risk_score}. "
-            f"Login required."
-        )
+        if severity != "Critical":
+            return {"sent": False, "reason": "severity_not_critical"}
+
+        if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE):
+            return {"sent": False, "reason": "missing_config"}
+
+        client = Client(TWILIO_SID, TWILIO_TOKEN)
+        target_phones = TEAM_NUMBERS or []
+        results = []
+
+        sms_body = f"SentriX Alert: Critical {incident_type} detected. ID: {ref}. Risk: {risk_score}."
 
         for target_phone in target_phones:
-            message = client.messages.create(
-                to=target_phone,
-                from_=TWILIO_PHONE,
-                body=sms_message
-            )
+            try:
+                message = client.messages.create(to=target_phone, from_=TWILIO_PHONE, body=sms_body)
+                results.append({"type": "sms", "sent": True, "sid": message.sid, "to": target_phone})
+            except Exception as e:
+                results.append({"type": "sms", "sent": False, "error": str(e)[:150]})
 
-            results.append({
-                "type": "sms",
-                "sent": True,
-                "sid": message.sid,
-                "to": target_phone
-            })
+            try:
+                response = VoiceResponse()
+                response.say(f"SentriX Security Alert. Critical incident {ref} detected. Please check dashboard.", language="en-US")
+                call = client.calls.create(twiml=str(response), to=target_phone, from_=TWILIO_PHONE)
+                results.append({"type": "voice", "sent": True, "sid": call.sid, "to": target_phone})
+            except Exception as e:
+                results.append({"type": "voice", "sent": False, "error": str(e)[:150]})
 
+        result = {"sent": any(item.get("sent") is True for item in results), "results": results}
     except Exception as e:
-        results.append({
-            "type": "sms",
-            "sent": False,
-            "error": str(e)[:300]
-        })
-
-    # -----------------------------------------------------------------------
-    # 2. VOICE CALL ALERT
-    # -----------------------------------------------------------------------
-
-    try:
-        # Create dynamic TwiML for the voice call
-        voice_message = (
-            f"SentriX Security Alert. "
-            f"A critical {incident_type} incident has been detected. "
-            f"Incident ID {ref}. "
-            f"Risk score {risk_score}. "
-            f"Immediate attention is required."
-        )
-
-        response = VoiceResponse()
-
-        response.say(
-            voice_message,
-            language="en-US"
-        )
-
-        for target_phone in target_phones:
-            call = client.calls.create(
-                twiml=str(response),
-                to=target_phone,
-                from_=TWILIO_PHONE
-            )
-
-            results.append({
-                "type": "voice",
-                "sent": True,
-                "sid": call.sid,
-                "to": target_phone
-            })
-
-    except Exception as e:
-        results.append({
-            "type": "voice",
-            "sent": False,
-            "error": str(e)[:300]
-        })
-
-    # -----------------------------------------------------------------------
-    # FINAL RESULT
-    # -----------------------------------------------------------------------
-
-    result = {
-        "sent": any(item.get("sent") is True for item in results),
-        "results": results
-    }
+        result = {"sent": False, "error": str(e)[:200]}
 
     LAST_TWILIO = result
-
     return result
