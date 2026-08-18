@@ -47,6 +47,7 @@ TWILIO_PHONE = os.environ.get("TWILIO_PHONE")
 TEAM_NUMBERS = [n.strip() for n in os.environ.get("TEAM_NUMBERS", "").split(",") if n.strip()]
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
+TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
 SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "45"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
 
@@ -189,15 +190,42 @@ CRSI_PENALTY = {"Critical": 12.0, "High": 7.0, "Medium": 3.0, "Low": 0.0}
 CRSI_SPILLOVER = 0.20
 CRSI_WINDOW = 20
 
+THREAT_TYPE_ALIASES = {
+    "brute_force": "Brute-force",
+    "ddos": "DDoS",
+    "dos": "DoS",
+    "botnet": "Botnet",
+    "heartbleed": "Heartbleed",
+    "web_attack": "Web Attacks",
+    "insider_threat": "Infiltration",
+    "data_exfiltration": "Infiltration",
+    "malware": "Botnet",
+    "ransomware": "Infiltration",
+    "phishing": "Web Attacks",
+}
+
 MITRE_MAP = {
-    "ransomware":     {"domains": ["endpoint_security", "backup_recovery", "detect_respond"]},
-    "brute_force":    {"domains": ["identify_access", "detect_respond"]},
-    "ddos":           {"domains": ["network_security", "detect_respond"]},
-    "phishing":       {"domains": ["identify_access", "nca_controls"]},
-    "malware":        {"domains": ["endpoint_security", "detect_respond"]},
-    "insider_threat": {"domains": ["identify_access", "nca_controls"]},
-    "benign":         {"domains": []},
-    "_default":       {"domains": ["detect_respond"]},
+    "ransomware":     {"domains": ["endpoint_security", "backup_recovery", "detect_respond"],
+                       "tactics": ["Impact", "Defense Evasion"],
+                       "techniques": ["T1486", "T1490", "T1070"]},
+    "brute_force":    {"domains": ["identify_access", "detect_respond"],
+                       "tactics": ["Credential Access", "Initial Access"],
+                       "techniques": ["T1110", "T1078"]},
+    "ddos":           {"domains": ["network_security", "detect_respond"],
+                       "tactics": ["Impact"],
+                       "techniques": ["T1498", "T1499"]},
+    "phishing":       {"domains": ["identify_access", "nca_controls"],
+                       "tactics": ["Initial Access", "Credential Access"],
+                       "techniques": ["T1566", "T1204"]},
+    "malware":        {"domains": ["endpoint_security", "detect_respond"],
+                       "tactics": ["Execution", "Persistence"],
+                       "techniques": ["T1204", "T1547", "T1059"]},
+    "insider_threat": {"domains": ["identify_access", "nca_controls"],
+                       "tactics": ["Exfiltration", "Collection"],
+                       "techniques": ["T1041", "T1005"]},
+    "benign":         {"domains": [], "tactics": [], "techniques": []},
+    "_default":       {"domains": ["detect_respond"],
+                       "tactics": ["Execution"], "techniques": ["T1059"]},
 }
 
 PLAYBOOKS = {
@@ -215,6 +243,7 @@ PLAYBOOKS = {
 # 4. LOCAL MIRROR
 # ===========================================================================
 PKG_FILE = DB_DIR / "packages.json"
+CRSI_FILE = DB_DIR / "crsi_archives.json"
 
 def _read_mirror() -> list:
     if PKG_FILE.exists():
@@ -227,10 +256,41 @@ def _write_mirror(rows: list) -> None:
 
 PACKAGES: list = _read_mirror()
 
-def sb_insert(table: str, row: dict) -> None:
-    if not supabase: return
-    try: supabase.table(table).insert(row).execute()
-    except Exception as e: print(f"[supabase] insert {table} failed: {e}")
+
+def _read_crsi_archives() -> list:
+    if CRSI_FILE.exists():
+        try: return json.loads(CRSI_FILE.read_text(encoding="utf-8"))
+        except Exception: return []
+    return []
+
+
+def _write_crsi_archives(rows: list) -> None:
+    CRSI_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+CRSI_ARCHIVES: list = _read_crsi_archives()
+
+SUPABASE_ERRORS: list = []
+
+
+def sb_insert(table: str, row: dict) -> bool:
+    """
+    كان الفشل يُطبع في اللوج فقط، فلا تعرف الواجهة أن التخزين لم يحدث.
+    الآن يُحفظ آخر خطأ ويظهر في /api/debug/config.
+    """
+    if not supabase:
+        SUPABASE_ERRORS.append({"table": table, "error": "supabase client not configured", "at": now_iso()})
+        del SUPABASE_ERRORS[:-20]
+        return False
+    try:
+        supabase.table(table).insert(row).execute()
+        return True
+    except Exception as e:
+        msg = str(e)[:400]
+        print(f"[supabase] insert {table} failed: {msg}")
+        SUPABASE_ERRORS.append({"table": table, "error": msg, "at": now_iso()})
+        del SUPABASE_ERRORS[:-20]
+        return False
 
 def hydrate_from_supabase() -> None:
     global PACKAGES
@@ -264,6 +324,7 @@ class IncidentIn(BaseModel):
     exposure: str = "internal"
     vulnerability_level: str = "medium"
     business_impact: str = "medium"
+    source_file_name: str | None = None
     flow_features: dict | None = None
 
 def features_complete(features: dict | None) -> bool:
@@ -298,10 +359,18 @@ def process_incident(payload: IncidentIn) -> dict:
     # كل حادثة — أياً كان مصدرها — تمر على محرك الخطورة نفسه.
     # الشدة العشوائية السابقة لحوادث السيرفر كانت تلغي نتيجة DataRobot
     # وتجعل كل الحوادث متشابهة.
-    risk_result = calculate_risk(
-        anomaly_score=ai_data["anomaly_score"], asset_criticality=payload.asset_criticality,
-        exposure=payload.exposure, vulnerability_level=payload.vulnerability_level, business_impact=payload.business_impact,
-    )
+    try:
+        risk_result = calculate_risk(
+            anomaly_score=ai_data["anomaly_score"], asset_criticality=payload.asset_criticality,
+            exposure=payload.exposure, vulnerability_level=payload.vulnerability_level, business_impact=payload.business_impact,
+        )
+    except ValueError as e:
+        # قيمة سياق غير معروفة كانت تُسقط الطلب كاملاً (500) فلا تُسجَّل الحادثة
+        print(f"[risk] invalid context, falling back to defaults: {e}")
+        risk_result = calculate_risk(
+            anomaly_score=ai_data["anomaly_score"], asset_criticality="medium",
+            exposure="internal", vulnerability_level="medium", business_impact="medium",
+        )
     severity_raw = str(risk_result.get("severity", "LOW")).upper()
     # المسار القصير للحوادث المنخفضة فقط — لا لكل حادثة بلا فيتشرز
     flow = "short_path" if severity_raw == "LOW" else "full_path"
@@ -313,17 +382,30 @@ def process_incident(payload: IncidentIn) -> dict:
         "risk_factors": risk_result.get("risk_factors", {}), "flow": flow
     }
 
-    threat_result = analyze_threat(itype)
+    # مفاتيح THREAT_PROFILES في threat_service مكتوبة بصيغة أخرى
+    # ("Brute-force" / "DDoS" / "Infiltration"...)، فكان كل نوع يخرج
+    # is_unmapped=True بلا MITRE ولا CIA. هذه الخريطة توفّق بين الاثنين.
+    threat_result = analyze_threat(THREAT_TYPE_ALIASES.get(itype, itype))
+    mitre_ref = MITRE_MAP.get(itype, MITRE_MAP["_default"])
+    tactics = [t.get("name") if isinstance(t, dict) else t for t in threat_result.get("mitre_tactics", [])]
+    techniques = [t.get("id") if isinstance(t, dict) else t for t in threat_result.get("mitre_techniques", [])]
+    # ملفات threat_service لا تحمل تقنيات إلا لنوع واحد، فتظهر الخانة فارغة
+    # في صفحة التحليل. نكملها من الخريطة المرجعية عند غيابها.
+    if not tactics:
+        tactics = mitre_ref.get("tactics", [])
+    if not techniques:
+        techniques = mitre_ref.get("techniques", [])
+
     threat = {
         "matched_profile": threat_result.get("matched_profile", itype), "is_unmapped": threat_result.get("is_unmapped", False),
-        "mitre_tactics": [t.get("name") if isinstance(t, dict) else t for t in threat_result.get("mitre_tactics", [])],
-        "mitre_techniques": [t.get("id") if isinstance(t, dict) else t for t in threat_result.get("mitre_techniques", [])],
+        "mitre_tactics": tactics,
+        "mitre_techniques": techniques,
         "cia_impact": {
             "confidentiality": str(threat_result.get("confidentiality_impact", "Medium")).capitalize(),
             "integrity": str(threat_result.get("integrity_impact", "Medium")).capitalize(),
             "availability": str(threat_result.get("availability_impact", "Medium")).capitalize()
         },
-        "failed_domains": MITRE_MAP.get(itype, MITRE_MAP["_default"])["domains"]
+        "failed_domains": mitre_ref["domains"]
     }
 
     pb_data = PLAYBOOKS.get(itype, PLAYBOOKS["_default"])
@@ -339,7 +421,7 @@ def process_incident(payload: IncidentIn) -> dict:
     incident_row = {
         "id": ref, "uuid": incident_uuid, "title": title, "incident_type": itype, "source": payload.source, "input_method": payload.input_method,
         "source_ip": payload.source_ip, "destination_ip": payload.destination_ip, "description": payload.description or f"{itype} detected.",
-        "asset_type": payload.asset_type, "asset_criticality": payload.asset_criticality, "exposure": payload.exposure, "vulnerability_level": payload.vulnerability_level,
+        "asset_type": payload.asset_type, "asset_criticality": payload.asset_criticality, "exposure": payload.exposure, "vulnerability_level": payload.vulnerability_level, "source_file_name": payload.source_file_name,
         "business_impact": payload.business_impact, "created_at": created_at, "status": "Analyzed", "severity": risk["severity"], "risk_score": risk["risk_score"]
     }
 
@@ -359,7 +441,7 @@ def process_incident(payload: IncidentIn) -> dict:
 
     PACKAGES.insert(0, package)
     _write_mirror(PACKAGES)
-    persist_to_supabase(package, incident_uuid, pdf_bytes)
+    package["persistence"] = persist_to_supabase(package, incident_uuid, pdf_bytes)
     package["notification"] = notify_twilio(ref, risk["severity"], itype, risk["risk_score"])
     return package
 
@@ -392,16 +474,30 @@ def compute_crsi(packages: list) -> dict:
     maturity = "Strong" if overall >= 80 else "Moderate" if overall >= 60 else "Weak" if overall >= 40 else "Critical"
     return {"score": overall, "maturity_level": maturity, "breakdown": sorted(breakdown, key=lambda b: b["score"]), "incident_count": len(window), "assessment_window": CRSI_WINDOW}
 
-def persist_to_supabase(pkg: dict, incident_uuid: str, pdf_bytes: bytes) -> None:
-    if not supabase: return
+def persist_to_supabase(pkg: dict, incident_uuid: str, pdf_bytes: bytes) -> dict:
+    if not supabase:
+        return {"stored": False, "reason": "supabase client not configured"}
     inc, risk, threat = pkg["incident"], pkg["risk"], pkg["threat"]
     sev_db = risk["severity"].upper()
-    sb_insert("incidents", {"id": incident_uuid, "title": inc["title"], "source": inc["source"], "incident_type": inc["incident_type"], "source_ip": inc["source_ip"], "destination_ip": inc["destination_ip"], "description": inc["description"], "asset_type": inc["asset_type"], "asset_criticality": inc["asset_criticality"], "input_method": inc["input_method"], "exposure": inc["exposure"], "vulnerability_level": inc["vulnerability_level"], "business_impact": inc["business_impact"], "created_at": inc["created_at"]})
-    sb_insert("ai_results", {"id": str(uuid.uuid4()), "incident_id": incident_uuid, "anomaly_score": pkg["ai_result"]["anomaly_score"], "is_anomaly": pkg["ai_result"]["is_anomaly"], "model_name": pkg["ai_result"]["model_name"], "model_version": "v1.0", "prediction_metadata": {"threshold": pkg["ai_result"]["dynamic_threshold"], "scoring_mode": risk["scoring_mode"]}})
-    sb_insert("risk_results", {"id": str(uuid.uuid4()), "incident_id": incident_uuid, "risk_score": risk["risk_score"], "severity": sev_db, "risk_factors": risk["risk_factors"], "scoring_mode": risk["scoring_mode"], "flow": risk["flow"], "priority": risk["priority"], "sla_hours": risk["sla_hours"], "weights_used": risk["weights_used"], "dynamic_threshold": risk["dynamic_threshold"]})
+    status = {}
+    status["incidents"] = sb_insert("incidents", {"id": incident_uuid, "title": inc["title"], "source": inc["source"], "incident_type": inc["incident_type"], "source_ip": inc["source_ip"], "destination_ip": inc["destination_ip"], "description": inc["description"], "asset_type": inc["asset_type"], "asset_criticality": inc["asset_criticality"], "input_method": inc["input_method"], "exposure": inc["exposure"], "vulnerability_level": inc["vulnerability_level"], "business_impact": inc["business_impact"], "created_at": inc["created_at"],
+        "source_file_name": inc.get("source_file_name"), "incident_time": inc["created_at"]})
+    status["ai_results"] = sb_insert("ai_results", {"id": str(uuid.uuid4()), "incident_id": incident_uuid, "anomaly_score": pkg["ai_result"]["anomaly_score"], "is_anomaly": pkg["ai_result"]["is_anomaly"], "model_name": pkg["ai_result"]["model_name"], "model_version": "v1.0", "prediction_metadata": {"threshold": pkg["ai_result"]["dynamic_threshold"], "scoring_mode": risk["scoring_mode"]}})
+    status["risk_results"] = sb_insert("risk_results", {"id": str(uuid.uuid4()), "incident_id": incident_uuid, "risk_score": risk["risk_score"], "severity": sev_db, "risk_factors": risk["risk_factors"], "scoring_mode": risk["scoring_mode"], "flow": risk["flow"], "priority": risk["priority"], "sla_hours": risk["sla_hours"], "weights_used": risk["weights_used"], "dynamic_threshold": risk["dynamic_threshold"]})
+    status["threat_analysis"] = sb_insert("threat_analysis", {
+        "id": str(uuid.uuid4()), "incident_id": incident_uuid,
+        "threat_type": inc["incident_type"], "matched_profile": threat.get("matched_profile"),
+        "is_unmapped": threat.get("is_unmapped", False),
+        "mitre_tactics": threat.get("mitre_tactics", []), "mitre_techniques": threat.get("mitre_techniques", []),
+        "confidentiality_impact": str(threat["cia_impact"].get("confidentiality", "")).lower() or None,
+        "integrity_impact": str(threat["cia_impact"].get("integrity", "")).lower() or None,
+        "availability_impact": str(threat["cia_impact"].get("availability", "")).lower() or None,
+        "intel_version": "1.0",
+    })
     report_uuid = str(uuid.uuid4())
-    sb_insert("incident_reports", {"id": report_uuid, "incident_id": incident_uuid, "report_json": pkg, "pdf_path": pkg["archive"]["pdf_path"], "report_version": "10.0"})
-    sb_insert("archives", {"id": pkg["archive"]["archive_id"], "report_id": report_uuid, "report_snapshot": pkg, "pdf_path": pkg["archive"]["pdf_path"], "archive_period": datetime.now(timezone.utc).strftime("%Y-%m"), "sha256_hash": pkg["archive"]["sha256"]})
+    status["incident_reports"] = sb_insert("incident_reports", {"id": report_uuid, "incident_id": incident_uuid, "report_json": pkg, "pdf_path": pkg["archive"]["pdf_path"], "report_version": "10.0"})
+    status["archives"] = sb_insert("archives", {"id": pkg["archive"]["archive_id"], "report_id": report_uuid, "report_snapshot": pkg, "pdf_path": pkg["archive"]["pdf_path"], "archive_period": datetime.now(timezone.utc).strftime("%Y-%m"), "sha256_hash": pkg["archive"]["sha256"]})
+    return {"stored": all(status.values()), "tables": status}
 
 # ===========================================================================
 # 6. PDF RENDERER
@@ -461,35 +557,75 @@ async def dashboard_stats():
         if s in sev: sev[s] += 1
     analyzed = sum(1 for p in PACKAGES if p["ai_result"]["anomaly_score"] is not None)
     
+    # النافذة كانت 24 ساعة مقابل 24 قبلها. بما أن المنصة تعمل منذ ساعات فقط،
+    # كانت النافذة السابقة فارغة دائماً فتثبت النسبة على 100% ولا تتحرك.
+    # نافذة قصيرة قابلة للضبط تجعل الأرقام تتحرك فعلياً مع تدفق الحوادث.
     now = datetime.now(timezone.utc)
+    W = TREND_WINDOW_HOURS
+
     def in_window(p, start_h, end_h):
         try:
-            t = datetime.fromisoformat(str(p["incident"]["created_at"]).replace("Z", "+00:00"))
-            return start_h <= (now - t).total_seconds() / 3600 < end_h
-        except: return False
-    
-    cur = [p for p in PACKAGES if in_window(p, 0, 24)]
-    prev = [p for p in PACKAGES if in_window(p, 24, 48)]
-    
-    def pct(a, b, is_bad=True):
-        if len(b) == 0: return {"change": "100%" if len(a) > 0 else "0%", "positive": len(a) <= len(b) if is_bad else len(a) >= len(b)}
-        delta = (len(a) - len(b)) / len(b) * 100
-        return {"change": f"{abs(round(delta))}%", "positive": delta <= 0 if is_bad else delta >= 0}
+            ts = datetime.fromisoformat(str(p["incident"]["created_at"]).replace("Z", "+00:00"))
+            age = (now - ts).total_seconds() / 3600
+            return start_h <= age < end_h
+        except Exception:
+            return False
 
-    cur_crit = [p for p in cur if p["risk"]["severity"] == "Critical"]
-    prev_crit = [p for p in prev if p["risk"]["severity"] == "Critical"]
+    cur = [p for p in PACKAGES if in_window(p, 0, W)]
+    prev = [p for p in PACKAGES if in_window(p, W, 2 * W)]
+
+    def pct(a, b, higher_is_good=False):
+        ca, cb = len(a), len(b)
+        if cb == 0:
+            change = "100%" if ca > 0 else "0%"
+            rising = ca > 0
+        else:
+            delta = (ca - cb) / cb * 100
+            change = f"{abs(round(delta))}%"
+            rising = delta >= 0
+        return {
+            "change": change,
+            "direction": "up" if rising else "down",
+            "positive": rising if higher_is_good else not rising,
+            "current": ca,
+            "previous": cb,
+        }
+
+    def only_critical(rows):
+        return [p for p in rows if p["risk"]["severity"] == "Critical"]
+
+    def only_analyzed(rows):
+        return [p for p in rows if p["ai_result"]["anomaly_score"] is not None]
+
+    def only_pending(rows):
+        return [p for p in rows if p["ai_result"]["anomaly_score"] is None]
 
     return {
         "attackTypes": attack_types or [{"name": "No data", "value": 0}],
         "totals": {"total": len(PACKAGES), "critical": sev["Critical"], "analyzed": analyzed, "pending": len(PACKAGES) - analyzed},
         "severityCounts": sev,
-        "trends": {"total": pct(cur, prev), "critical": pct(cur_crit, prev_crit), "analyzed": pct(cur, prev, False), "pending": {"change": "0%", "positive": True}},
+        "trends": {
+            "total": pct(cur, prev, higher_is_good=False),
+            "critical": pct(only_critical(cur), only_critical(prev), higher_is_good=False),
+            "analyzed": pct(only_analyzed(cur), only_analyzed(prev), higher_is_good=True),
+            "pending": pct(only_pending(cur), only_pending(prev), higher_is_good=False),
+        },
+        "trend_window_hours": W,
         "crsi": compute_crsi(PACKAGES),
     }
 
 @app.get("/api/incidents")
 async def list_incidents():
-    return [{**p["incident"], "risk_score": p["risk"]["risk_score"], "severity": p["risk"]["severity"], "hasAiResult": True, "ai_score": p["ai_result"]["anomaly_score"], "playbook": p["recommendation"]["playbook"]} for p in PACKAGES]
+    rows = [{
+        **p["incident"],
+        "risk_score": p["risk"]["risk_score"], "severity": p["risk"]["severity"],
+        "priority": p["risk"]["priority"], "scoring_mode": p["risk"]["scoring_mode"],
+        "flow": p["risk"]["flow"], "hasAiResult": p["ai_result"]["anomaly_score"] is not None,
+        "ai_score": p["ai_result"]["anomaly_score"], "playbook": p["recommendation"]["playbook"],
+    } for p in PACKAGES]
+    # ترتيب صريح بالأحدث أولاً حتى تظهر الحوادث الجديدة في أول الصفحة دائماً
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return rows
 
 @app.post("/api/incidents")
 async def create_incident(payload: IncidentIn):
@@ -582,12 +718,12 @@ async def crsi_recommendations():
 @app.get("/api/archive")
 async def list_archive():
     rows = [
-        {**p["archive"], "content": {"incidentTitle": p["incident"]["title"], "severity": p["risk"]["severity"], "riskScore": f"{p['risk']['risk_score']} / 100", "source": p["incident"]["source"], "asset": p["incident"]["asset_type"], "threatType": p["incident"]["incident_type"], "keyFindings": p["key_findings"], "playbook": p["recommendation"]["playbook"], "recommendedActions": [a["title"] for a in p["recommendation"]["actions"]]}}
+        {**p["archive"], "content": {"incidentTitle": p["incident"]["title"], "severity": p["risk"]["severity"], "riskScore": f"{p['risk']['risk_score']} / 100", "source": p["incident"]["source"], "asset": p["incident"]["asset_type"], "threatType": p["incident"]["incident_type"], "keyFindings": p["key_findings"], "playbook": p["recommendation"]["playbook"], "recommendedActions": [a["title"] for a in p["recommendation"]["actions"]], "inputMethod": p["incident"].get("input_method"), "sourceFile": p["incident"].get("source_file_name")}}
         for p in PACKAGES
     ]
-    if PACKAGES:
-        crsi = compute_crsi(PACKAGES)
-        rows.append({"archive_id": "CRSI-CURRENT", "report_id": f"RPT-CRSI-{datetime.now(timezone.utc).strftime('%Y%m%d')}", "incident_id": None, "title": "CRSI Report - Organizational Assessment", "type": "CRSI Report", "archived_at": now_iso()[:16], "sha256": sha256_of(canonical_json(crsi)), "archived_by": "SentriX Engine", "retention_until": (date.today() + timedelta(days=365 * 7)).isoformat(), "storage_type": "WORM (Immutable)", "isCrsi": True, "content": {"overallScore": f"{crsi['score']} / 100", "maturityLevel": crsi["maturity_level"]}})
+    # تقارير الـCRSI المؤرشفة فعلياً (لا لقطة مؤقتة تُبنى مع كل طلب)
+    rows.extend(CRSI_ARCHIVES)
+    rows.sort(key=lambda r: str(r.get("archived_at") or ""), reverse=True)
     return rows
 
 @app.post("/api/archive/verify/{incident_id}")
@@ -596,7 +732,7 @@ async def verify_archive(incident_id: str):
     if not p: raise HTTPException(404, "Not found")
     # يُعاد حساب البصمة فعلياً ثم تُقارن بالمخزّنة.
     # نستثني المفتاحين اللذين أُضيفا بعد لحظة الحساب: archive و notification.
-    snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification")}
+    snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification", "persistence")}
     current = sha256_of(canonical_json(snapshot))
     stored = p["archive"]["sha256"]
     return {
@@ -615,13 +751,67 @@ async def download_archive(incident_id: str):
     if not path.exists(): path.write_bytes(render_pdf(p))
     return Response(content=path.read_bytes(), media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{p["report"]["report_id"]}.pdf"'})
 
-# مسارات الأرشيف الإضافية (إصلاح 6)
-@app.post("/api/archive/{incident_id}")
 @app.post("/api/crsi-assessment/archive")
-@app.post("/api/archive/generate")
-@app.post("/api/archive/generate/{incident_id}")
-async def generate_and_archive_report(request: Request):
-    return {"success": True, "message": "Report successfully archived."}
+async def archive_crsi_report():
+    """
+    يؤرشف لقطة مجمّدة من تقييم الـCRSI الحالي.
+    كان هذا المسار يرجع رسالة نجاح فقط بلا تخزين، فلا يظهر شيء في الأرشيف.
+    """
+    crsi = compute_crsi(PACKAGES)
+    stamp = datetime.now(timezone.utc)
+    snapshot = {
+        "crsi_score": crsi["score"],
+        "maturity_level": crsi["maturity_level"],
+        "incident_count": crsi["incident_count"],
+        "assessment_window": crsi["assessment_window"],
+        "breakdown": crsi["breakdown"],
+        "generated_at": stamp.isoformat(),
+    }
+
+    archive_uuid = str(uuid.uuid4())
+    row = {
+        "archive_id": archive_uuid,
+        "report_id": f"RPT-CRSI-{stamp.strftime('%Y%m%d-%H%M%S')}",
+        "incident_id": None,
+        "title": "CRSI Report - Organizational Assessment",
+        "type": "CRSI Report",
+        "archived_at": stamp.isoformat().replace("T", " ")[:16],
+        "sha256": sha256_of(canonical_json(snapshot)),
+        "archived_by": "SentriX CRSI Engine",
+        "retention_until": (date.today() + timedelta(days=365 * 7)).isoformat(),
+        "storage_type": "WORM (Immutable)",
+        "archive_period": stamp.strftime("%Y-%m"),
+        "isCrsi": True,
+        "snapshot": snapshot,
+        "content": {
+            "overallScore": f"{crsi['score']} / 100",
+            "maturityLevel": crsi["maturity_level"],
+            "incidentCount": crsi["incident_count"],
+            "breakdownList": crsi["breakdown"],
+        },
+    }
+
+    CRSI_ARCHIVES.insert(0, row)
+    _write_crsi_archives(CRSI_ARCHIVES[:100])
+
+    sb_insert("archives", {
+        "id": archive_uuid,
+        "report_snapshot": snapshot,
+        "archive_period": row["archive_period"],
+        "sha256_hash": row["sha256"],
+    })
+
+    sb_insert("organizational_security_scores", {
+        "id": str(uuid.uuid4()),
+        "score": crsi["score"],
+        "period_start": date.today().isoformat(),
+        "period_end": date.today().isoformat(),
+        "maturity_level": crsi["maturity_level"],
+        "incident_count": crsi["incident_count"],
+        "calculation_metadata": {"assessment_window": crsi["assessment_window"]},
+    })
+
+    return {"success": True, "archived": row}
 
 from fastapi import Body
 
@@ -705,7 +895,16 @@ async def health():
 
 @app.get("/api/debug/config")
 async def debug_config():
-    return {"supabase_connected": supabase is not None, "packages_in_memory": len(PACKAGES), "status": "Ready and Merged"}
+    return {
+        "supabase_connected": supabase is not None,
+        "packages_in_memory": len(PACKAGES),
+        "crsi_archives": len(CRSI_ARCHIVES),
+        "trend_window_hours": TREND_WINDOW_HOURS,
+        "simulator_enabled": SIM_ENABLED,
+        "simulator_interval_seconds": SIM_INTERVAL,
+        "last_supabase_errors": SUPABASE_ERRORS[-5:],
+        "status": "Ready",
+    }
 
 # ===========================================================================
 # 8. DYNAMIC SIMULATOR
@@ -864,6 +1063,7 @@ async def upload_pdf(
         exposure=exposure,
         vulnerability_level=vulnerability_level,
         business_impact=business_impact,
+        source_file_name=file.filename,
         flow_features=extracted if complete else None,
     )
 
