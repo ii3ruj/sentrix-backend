@@ -502,6 +502,50 @@ async def health():
 async def debug_config():
     return {"supabase_connected": supabase is not None, "packages_in_memory": len(PACKAGES), "status": "Ready and Merged"}
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+# 1. قائمة المسارات العامة المسموح بها بدون تسجيل دخول
+PUBLIC_PATHS = [
+    "/api/auth/login",
+    "/api/auth/register",
+    "/health",
+    "/docs",
+    "/openapi.json"
+]
+
+# 2. نقطة التفتيش المركزية (Default-Deny Middleware)
+@app.middleware("http")
+async def centralized_auth_guard(request: Request, call_next):
+    path = request.url.path
+    
+    # السماح للمسارات العامة أو مسارات غير الـ API بالمرور
+    if any(path.startswith(p) for p in PUBLIC_PATHS) or not path.startswith("/api/"):
+        return await call_next(request)
+    
+    # التحقق من وجود التوكن في الـ Headers
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401, 
+            content={"detail": "Unauthorized: Missing or invalid token."}
+        )
+    
+    token = auth_header.split(" ")[1]
+    
+    # التحقق من صحة التوكن عبر Supabase (Server-side validation)
+    try:
+        # إذا كنتِ تستخدمين Supabase Auth
+        user = supabase.auth.get_user(jwt=token)
+        if not user:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized: Invalid session."})
+    except Exception as e:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized: Session expired or invalid."})
+
+    # إذا كان التوكن صحيحاً، يتم استكمال الطلب
+    response = await call_next(request)
+    return response
+
 # ===========================================================================
 # 8. DYNAMIC SIMULATOR (Fixes 1 & 3)
 # ===========================================================================
