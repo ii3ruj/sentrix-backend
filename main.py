@@ -7,7 +7,9 @@ DataRobot Prediction + Modular AI Services + Supabase + PDF Archiving.
 """
 
 import asyncio
+import base64
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -76,32 +78,86 @@ PUBLIC_PATHS = [
     "/openapi.json"
 ]
 
+# ---------------------------------------------------------------------------
+# توكن محلي موقّع (HMAC) — لا يعتمد على وجود مستخدم في Supabase Auth.
+# هذا هو سبب تعليق تسجيل الدخول سابقاً: الحارس كان يتحقق عبر
+# supabase.auth.get_user() فقط، وحسابات الفريق موجودة في جدول users
+# وليست في Supabase Auth، فكان كل طلب يرجع 401.
+# ---------------------------------------------------------------------------
+AUTH_SECRET = os.environ.get("AUTH_SECRET", "sentrix-local-secret-change-me")
+TOKEN_TTL_HOURS = int(os.environ.get("TOKEN_TTL_HOURS", "12"))
+
+DEMO_EMAIL = os.environ.get("DEMO_EMAIL", "analyst@gmail.com").strip().lower()
+DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "Secure123")
+
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _b64d(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def issue_token(email: str) -> str:
+    payload = json.dumps(
+        {"email": email, "exp": int(datetime.now(timezone.utc).timestamp()) + TOKEN_TTL_HOURS * 3600},
+        separators=(",", ":"),
+    ).encode()
+    body = _b64e(payload)
+    sig = _b64e(hmac.new(AUTH_SECRET.encode(), body.encode(), hashlib.sha256).digest())
+    return f"stx.{body}.{sig}"
+
+
+def verify_local_token(token: str) -> dict | None:
+    try:
+        prefix, body, sig = token.split(".")
+        if prefix != "stx":
+            return None
+        expected = _b64e(hmac.new(AUTH_SECRET.encode(), body.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(_b64d(body))
+        if data.get("exp", 0) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        return data
+    except Exception:
+        return None
+
+
 @app.middleware("http")
 async def centralized_auth_guard(request: Request, call_next):
     path = request.url.path
-    
+
     # 1. السماح للمسارات العامة بالمرور بدون توكن
     if any(path.startswith(p) for p in PUBLIC_PATHS) or not path.startswith("/api/"):
         return await call_next(request)
-    
-    # 2. التحقق من وجود التوكن (JWT)
+
+    # طلبات preflight لازم تمر وإلا ينكسر CORS من المتصفح
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # 2. التحقق من وجود التوكن
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "Unauthorized: Missing or invalid token."})
-    
-    token = auth_header.split(" ")[1]
-    
-    # 3. التحقق من صحة التوكن عبر Supabase (Server-side validation)
+
+    token = auth_header.split(" ", 1)[1].strip()
+
+    # 3أ. توكن SentriX المحلي
+    if verify_local_token(token):
+        return await call_next(request)
+
+    # 3ب. توكن Supabase Auth (لمن أنشأ حساباً هناك)
     try:
         if supabase:
             user = supabase.auth.get_user(jwt=token)
-            if not user:
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized: Invalid session."})
-    except Exception as e:
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized: Session expired or invalid."})
+            if user:
+                return await call_next(request)
+    except Exception:
+        pass
 
-    # استكمال الطلب إذا كان التوكن سليماً
-    return await call_next(request)
+    return JSONResponse(status_code=401, content={"detail": "Unauthorized: Session expired or invalid."})
 
 FEATURE_KEYS = [
     "Protocol", "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
@@ -127,8 +183,10 @@ CRSI_DOMAINS = {
     "backup_recovery":  {"name": "Backup & Recovery", "weight": 0.15, "ref": "NIST RC.RP | ISO 27001 A.12.3 | NCA 2-9"},
     "nca_controls":     {"name": "NCA Controls",      "weight": 0.15, "ref": "NCA ECC-1:2018"},
 }
-CRSI_PENALTY = {"Critical": 25.0, "High": 12.0, "Medium": 4.0, "Low": 0.0}
-CRSI_SPILLOVER = 0.30
+# معايرة: القيم السابقة كانت تُنزل الدرجة إلى الصفر بعد حوادث قليلة
+# فتبقى "Critical" دائماً ولا تعكس أي تغيّر في الوضع.
+CRSI_PENALTY = {"Critical": 12.0, "High": 7.0, "Medium": 3.0, "Low": 0.0}
+CRSI_SPILLOVER = 0.20
 CRSI_WINDOW = 20
 
 MITRE_MAP = {
@@ -237,24 +295,23 @@ def process_incident(payload: IncidentIn) -> dict:
             })
         except Exception as e: print(f"[datarobot modular error] {e}")
 
-    if payload.input_method == "server":
-        if itype == "benign": severity, score = "Low", random.randint(10, 24)
-        elif itype in ["phishing", "brute_force"]: severity, score = "Medium", random.randint(25, 49)
-        elif itype == "insider_threat": severity, score = "High", random.randint(50, 74)
-        else: severity, score = random.choice(["High", "Critical"]), random.randint(75, 95)
-        risk = {"risk_score": score, "severity": severity, "priority": f"P{4 if severity=='Low' else 3 if severity=='Medium' else 2 if severity=='High' else 1}", "sla_hours": 24, "is_deviating": ai_data["is_anomaly"], "dynamic_threshold": ai_data["dynamic_threshold"], "scoring_mode": "ml_assisted", "weights_used": {}, "risk_factors": {}, "flow": "full_path"}
-    else:
-        risk_result = calculate_risk(
-            anomaly_score=ai_data["anomaly_score"], asset_criticality=payload.asset_criticality,
-            exposure=payload.exposure, vulnerability_level=payload.vulnerability_level, business_impact=payload.business_impact,
-        )
-        risk = {
-            "risk_score": risk_result.get("risk_score"), "severity": str(risk_result.get("severity", "Low")).capitalize(),
-            "priority": risk_result.get("priority", "P3"), "sla_hours": risk_result.get("sla_hours", 24),
-            "is_deviating": ai_data["is_anomaly"], "dynamic_threshold": ai_data["dynamic_threshold"],
-            "scoring_mode": risk_result.get("scoring_mode", "context_only"), "weights_used": risk_result.get("weights_used", {}),
-            "risk_factors": risk_result.get("risk_factors", {}), "flow": risk_result.get("flow", "full_path")
-        }
+    # كل حادثة — أياً كان مصدرها — تمر على محرك الخطورة نفسه.
+    # الشدة العشوائية السابقة لحوادث السيرفر كانت تلغي نتيجة DataRobot
+    # وتجعل كل الحوادث متشابهة.
+    risk_result = calculate_risk(
+        anomaly_score=ai_data["anomaly_score"], asset_criticality=payload.asset_criticality,
+        exposure=payload.exposure, vulnerability_level=payload.vulnerability_level, business_impact=payload.business_impact,
+    )
+    severity_raw = str(risk_result.get("severity", "LOW")).upper()
+    # المسار القصير للحوادث المنخفضة فقط — لا لكل حادثة بلا فيتشرز
+    flow = "short_path" if severity_raw == "LOW" else "full_path"
+    risk = {
+        "risk_score": risk_result.get("risk_score"), "severity": severity_raw.capitalize(),
+        "priority": risk_result.get("priority", "P3"), "sla_hours": risk_result.get("sla_hours", 24),
+        "is_deviating": ai_data["is_anomaly"], "dynamic_threshold": ai_data["dynamic_threshold"],
+        "scoring_mode": risk_result.get("scoring_mode", "context_only"), "weights_used": risk_result.get("weights_used", {}),
+        "risk_factors": risk_result.get("risk_factors", {}), "flow": flow
+    }
 
     threat_result = analyze_threat(itype)
     threat = {
@@ -473,12 +530,28 @@ async def recommendations(incident_id: str | None = None):
 async def crsi_assessment():
     crsi = compute_crsi(PACKAGES)
     
+    # يُعاد حساب الدرجة كما كانت في نهاية كل يوم من الحوادث الفعلية.
+    # القيم العشوائية السابقة كانت تتغير مع كل تحديث وتخالف درجة صفحة التوصيات.
     daily_history = []
     today = datetime.now(timezone.utc).date()
+
+    def pkg_day(pkg):
+        try:
+            return datetime.fromisoformat(str(pkg["incident"]["created_at"]).replace("Z", "+00:00")).date()
+        except Exception:
+            return None
+
     for i in range(5):
         day = today - timedelta(days=i)
-        daily_history.append({"date": day.strftime("%b %d, %Y"), "score": random.randint(50, crsi["score"] + 10) if crsi["score"] < 80 else random.randint(70, 90), "status": "Good" if crsi["score"] >= 70 else "Poor"})
-        
+        upto = [p for p in PACKAGES if pkg_day(p) is not None and pkg_day(p) <= day]
+        day_score = compute_crsi(upto)["score"] if upto else 100.0
+        daily_history.append({
+            "date": day.strftime("%b %d, %Y"),
+            "score": day_score,
+            "status": "Good" if day_score >= 70 else "Fair" if day_score >= 40 else "Poor",
+            "incident_count": len(upto[:CRSI_WINDOW]),
+        })
+
     return {"score": crsi["score"], "maturity_level": crsi["maturity_level"], "breakdown": crsi["breakdown"], "dailyScores": daily_history, "incident_count": crsi["incident_count"]}
 
 @app.get("/api/crsi-recommendations")
@@ -521,7 +594,18 @@ async def list_archive():
 async def verify_archive(incident_id: str):
     p = next((pkg for pkg in PACKAGES if incident_id == pkg["incident"]["id"]), None)
     if not p: raise HTTPException(404, "Not found")
-    return {"incident_id": incident_id, "integrity_ok": True, "stored_sha256": p["archive"]["sha256"], "current_sha256": p["archive"]["sha256"], "verified_at": now_iso(), "storage_type": "WORM"}
+    # يُعاد حساب البصمة فعلياً ثم تُقارن بالمخزّنة.
+    # نستثني المفتاحين اللذين أُضيفا بعد لحظة الحساب: archive و notification.
+    snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification")}
+    current = sha256_of(canonical_json(snapshot))
+    stored = p["archive"]["sha256"]
+    return {
+        "incident_id": incident_id, "integrity_ok": current == stored,
+        "stored_sha256": stored, "current_sha256": current,
+        "archived_by": p["archive"].get("archived_by"), "archived_at": p["archive"].get("archived_at"),
+        "retention_until": p["archive"].get("retention_until"),
+        "verified_at": now_iso(), "storage_type": p["archive"].get("storage_type", "WORM (Immutable)"),
+    }
 
 @app.get("/api/archive/{incident_id}/download")
 async def download_archive(incident_id: str):
@@ -543,25 +627,59 @@ from fastapi import Body
 
 @app.post("/api/auth/login")
 async def api_login(credentials: dict = Body(...)):
-    email = credentials.get("email")
-    password = credentials.get("password")
-    
-    if not supabase:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-    
-    try:
-        # تسجيل الدخول عبر Supabase Auth الحقيقي
-        auth_response = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": password
-        })
-        
-        # استخراج التوكن الحقيقي وإرساله للفرونت إند
-        token = auth_response.session.access_token
-        return {"token": token, "user": auth_response.user}
-        
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    """
+    ثلاث طرق للتحقق بالترتيب، وأول واحدة تنجح تصدر التوكن:
+      1. Supabase Auth (لمن أنشأ الحساب هناك)
+      2. جدول users في Supabase — مقارنة sha256(password) بـ password_hash
+      3. بيانات العرض من متغيرات البيئة DEMO_EMAIL / DEMO_PASSWORD
+    """
+    email = str(credentials.get("email") or "").strip().lower()
+    password = str(credentials.get("password") or "")
+
+    if not email or not password:
+        raise HTTPException(status_code=401, detail="Email and password are required.")
+
+    # 1) Supabase Auth
+    if supabase:
+        try:
+            auth_response = supabase.auth.sign_in_with_password(
+                {"email": email, "password": password}
+            )
+            if auth_response and auth_response.session:
+                return {
+                    "token": auth_response.session.access_token,
+                    "user": {"email": email},
+                    "auth_source": "supabase_auth",
+                }
+        except Exception as exc:
+            print(f"[auth] supabase auth failed for {email}: {exc}")
+
+    # 2) جدول users
+    if supabase:
+        try:
+            res = supabase.table("users").select("*").eq("email", email).limit(1).execute()
+            row = (res.data or [None])[0]
+            if row:
+                stored = str(row.get("password_hash") or "")
+                given = hashlib.sha256(password.encode()).hexdigest()
+                if stored and hmac.compare_digest(stored, given):
+                    return {
+                        "token": issue_token(email),
+                        "user": {"email": email, "name": row.get("name"), "role": row.get("role")},
+                        "auth_source": "users_table",
+                    }
+        except Exception as exc:
+            print(f"[auth] users table lookup failed: {exc}")
+
+    # 3) بيانات العرض
+    if email == DEMO_EMAIL and hmac.compare_digest(password, DEMO_PASSWORD):
+        return {
+            "token": issue_token(email),
+            "user": {"email": email, "role": "analyst"},
+            "auth_source": "demo",
+        }
+
+    raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
 # ===========================================================================
 # 🚨 ADMIN CLEAR CACHE & DB 🚨
@@ -611,7 +729,15 @@ def build_sim_incident() -> IncidentIn:
     # 3. تنويع المصادر
     sources = ["EDR", "SIEM", "Firewall", "IDS", "DLP", "SOAR", "Email Gateway", "WAF"]
     hot = itype in ["ransomware", "ddos", "malware"]
-    crits = ["low", "medium"] if not hot else ["high", "critical"]
+    # تدرّج حقيقي في السياق بدل قيمتين فقط، فتتوزع الشدة على المستويات الأربعة
+    if itype == "benign":
+        crits = ["low"]
+    elif itype in ("phishing", "brute_force"):
+        crits = ["low", "medium"]
+    elif itype == "insider_threat":
+        crits = ["medium", "high"]
+    else:
+        crits = ["high", "critical"]
     
     return IncidentIn(
         incident_type=itype,
@@ -653,6 +779,7 @@ async def upload_pdf(
 ):
     data = await file.read()
     extracted: dict = {}
+    text = ""
     itype = "malware"
     src_ip = None
 
@@ -692,11 +819,35 @@ async def upload_pdf(
     except Exception as e:
         print(f"[pdf] extraction failed: {e}")
 
-    if len(extracted) > 5:
-        for k in FEATURE_KEYS:
-            if k not in extracted: extracted[k] = 0.0
-
+    # حشو الفيتشرز الناقصة بأصفار كان يرسل بيانات مزيّفة إلى النموذج،
+    # فتخرج نفس النتيجة لكل ملف. الآن لا يُستدعى النموذج إلا بفيتشرز كاملة فعلاً.
     complete = features_complete(extracted)
+
+    # السياق يُقرأ من التقرير نفسه بدل قيم ثابتة لكل ملف،
+    # وهذا سبب خروج نفس التحليل المحفوظ مع كل رفع.
+    lower_text = (text or "").lower()
+
+    def pick(keys, options, default):
+        for line in lower_text.splitlines():
+            if any(k in line for k in keys):
+                for opt in options:
+                    if opt in line:
+                        return opt
+        return default
+
+    asset_criticality = pick(["asset criticality", "criticality"],
+                             ["critical", "high", "medium", "low"], "high")
+    exposure = pick(["exposure"], ["internet_facing", "internet facing", "dmz", "internal"],
+                    "internet_facing" if itype in ("ddos", "ransomware") else "internal")
+    exposure = exposure.replace("internet facing", "internet_facing")
+    vulnerability_level = pick(["vulnerability"], ["critical", "high", "medium", "low", "none"], "high")
+    business_impact = pick(["business impact", "impact"], ["critical", "high", "medium", "low"], "high")
+
+    asset_type = "Server"
+    for candidate in ("workstation", "database", "network device", "cloud instance", "server"):
+        if candidate in lower_text:
+            asset_type = candidate.title()
+            break
 
     payload = IncidentIn(
         title=f"Incident report — {file.filename}",
@@ -704,15 +855,28 @@ async def upload_pdf(
         source="PDF Report",
         input_method="pdf",
         source_ip=src_ip,
-        asset_type="Server",
-        asset_criticality="high",
-        exposure="internet_facing" if itype in ("ddos", "ransomware") else "internal",
-        vulnerability_level="high",
-        business_impact="high",
+        description=(
+            f"Ingested from PDF '{file.filename}'. "
+            f"{len(extracted)}/{len(FEATURE_KEYS)} network flow features extracted."
+        ),
+        asset_type=asset_type,
+        asset_criticality=asset_criticality,
+        exposure=exposure,
+        vulnerability_level=vulnerability_level,
+        business_impact=business_impact,
         flow_features=extracted if complete else None,
     )
 
     result = process_incident(payload)
+    result["pdf_extraction"] = {
+        "matched_features": len(extracted),
+        "required_features": len(FEATURE_KEYS),
+        "used_for_model": complete,
+        "detected_incident_type": itype,
+        "uploaded_sha256": sha256_of(data),
+        "client_sha256": sha256,
+        "analyst": analyst,
+    }
     return result
 
 # ===========================================================================
