@@ -1754,7 +1754,6 @@ async def upload_pdf(
 
 import requests
 from twilio.rest import Client
-from twilio.twiml.voice_response import VoiceResponse
 
 
 def notify_email(pkg: dict) -> dict:
@@ -1798,7 +1797,6 @@ def notify_email(pkg: dict) -> dict:
         )
         ok = response.status_code in (200, 201, 202)
         if not ok:
-            # 401 مفاتيح خاطئة · 403 عنوان المُرسِل غير موثّق في Twilio
             print(f"[email] FAILED {response.status_code}: {response.text[:300]}")
         else:
             print(f"[email] sent to {', '.join(ALERT_EMAILS)} ({response.status_code})")
@@ -1828,7 +1826,6 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
 
         target_phones = TEAM_NUMBERS or []
         if not target_phones:
-            # كانت الحلقة تُتخطى بصمت فيظهر sent=False بلا أي سبب
             reason = "missing_config: TEAM_NUMBERS is empty"
             print(f"[twilio] skipped — {reason}")
             return {"sent": False, "reason": reason}
@@ -1839,23 +1836,25 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         sms_body = f"SentriX Alert: Critical {incident_type} detected. ID: {ref}. Risk: {risk_score}."
 
         for target_phone in target_phones:
+            # 1. إرسال الرسالة النصية SMS
             try:
                 message = client.messages.create(to=target_phone, from_=TWILIO_PHONE, body=sms_body)
                 print(f"[twilio] sms sid={message.sid} to={target_phone} status={message.status}")
                 results.append({"type": "sms", "sent": True, "sid": message.sid,
                                 "status": message.status, "to": target_phone})
             except Exception as e:
-                # 21608 رقم غير موثّق (حساب تجريبي) · 21408 المنطقة معطّلة
-                # 21606 المُرسِل لا يدعم SMS · 20003 الرصيد نفد أو المفاتيح خاطئة
                 code = getattr(e, "code", None)
                 print(f"[twilio] sms FAILED to={target_phone} code={code}: {e}")
                 results.append({"type": "sms", "sent": False, "code": code,
                                 "to": target_phone, "error": str(e)[:200]})
 
+            # 2. إجراء المكالمة الصوتية باستخدام القالب المضمون والمستقر
             try:
-                response = VoiceResponse()
-                response.say(f"SentriX Security Alert. Critical incident {ref} detected. Please check dashboard.", language="en-US")
-                call = client.calls.create(twiml=str(response), to=target_phone, from_=TWILIO_PHONE)
+                call = client.calls.create(
+                    url="https://webhooks.twilio.com/v1/Voice/Template/voice_auto_response",
+                    to=target_phone,
+                    from_=TWILIO_PHONE,
+                )
                 print(f"[twilio] call sid={call.sid} to={target_phone} status={call.status}")
                 results.append({"type": "voice", "sent": True, "sid": call.sid,
                                 "status": call.status, "to": target_phone})
