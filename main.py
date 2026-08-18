@@ -46,9 +46,17 @@ TWILIO_TOKEN = os.environ.get("TWILIO_TOKEN")
 TWILIO_PHONE = os.environ.get("TWILIO_PHONE")
 TEAM_NUMBERS = [n.strip() for n in os.environ.get("TEAM_NUMBERS", "").split(",") if n.strip()]
 
+# تنبيهات البريد للحوادث الحرجة
+ALERT_EMAILS = [e.strip() for e in os.environ.get("ALERT_EMAILS", "ruba35uj@gmail.com").split(",") if e.strip()]
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+SMTP_FROM = os.environ.get("SMTP_FROM") or SMTP_USER
+
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
-SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "180"))
+SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "25"))
 SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "60"))
 MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "200"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
@@ -90,8 +98,19 @@ PUBLIC_PATHS = [
 AUTH_SECRET = os.environ.get("AUTH_SECRET", "sentrix-local-secret-change-me")
 TOKEN_TTL_HOURS = int(os.environ.get("TOKEN_TTL_HOURS", "12"))
 
-DEMO_EMAIL = os.environ.get("DEMO_EMAIL", "analyst@gmail.com").strip().lower()
-DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "Secure123")
+# حسابات المنصة. كلمات المرور تُضبط من متغيرات البيئة في الإنتاج.
+DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "A123sentrix*")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "A123sentrix*")
+
+BUILTIN_ACCOUNTS = {
+    "analyst@sentrix.com": {"password": DEMO_PASSWORD, "role": "analyst",
+                            "name": "SOC Analyst", "active": True},
+    "admin@sentrix.com":   {"password": ADMIN_PASSWORD, "role": "admin",
+                            "name": "SentriX Admin", "active": True},
+    # حساب غير مفعّل — يُستخدم لعرض حالة "بانتظار التفعيل"
+    "pending@sentrix.com": {"password": DEMO_PASSWORD, "role": "analyst",
+                            "name": "Pending Analyst", "active": False},
+}
 
 
 def _b64e(raw: bytes) -> str:
@@ -289,6 +308,7 @@ CRSI_ARCHIVES: list = _read_crsi_archives()
 
 SUPABASE_ERRORS: list = []
 LAST_TWILIO: dict = {"sent": None, "reason": "no critical incident yet"}
+LAST_EMAIL: dict = {"sent": None, "reason": "no critical incident yet"}
 
 
 def sb_insert(table: str, row: dict) -> bool:
@@ -380,6 +400,20 @@ class IncidentIn(BaseModel):
     flow_features: dict | None = None
 
 _FEATURE_LOOKUP = {"".join(k.lower().split()): k for k in FEATURE_KEYS}
+
+# عيّنات حقيقية من بيانات التدريب — تُستخدم لتوليد حركة واقعية
+TRAFFIC_PROFILES: dict = {}
+try:
+    _profiles_path = BASE_DIR / "traffic_profiles.json"
+    if _profiles_path.exists():
+        _loaded = json.loads(_profiles_path.read_text(encoding="utf-8"))
+        TRAFFIC_PROFILES = {k: v for k, v in _loaded.items() if not k.startswith("_")}
+        print(f"[traffic] loaded profiles: " +
+              ", ".join(f"{k}={len(v)}" for k, v in TRAFFIC_PROFILES.items()))
+    else:
+        print("[traffic] traffic_profiles.json not found — using fallback generator")
+except Exception as _e:
+    print(f"[traffic] failed to load profiles: {_e}")
 
 
 def _match_feature(cell) -> str | None:
@@ -520,6 +554,7 @@ def process_incident(payload: IncidentIn) -> dict:
     _write_mirror(PACKAGES)
     package["persistence"] = persist_to_supabase(package, incident_uuid, pdf_bytes)
     package["notification"] = notify_twilio(ref, risk["severity"], itype, risk["risk_score"])
+    package["email_notification"] = notify_email(package)
     return package
 
 # ===========================================================================
@@ -938,12 +973,18 @@ async def api_login(credentials: dict = Body(...)):
         except Exception as exc:
             print(f"[auth] users table lookup failed: {exc}")
 
-    # 3) بيانات العرض
-    if email == DEMO_EMAIL and hmac.compare_digest(password, DEMO_PASSWORD):
+    # 3) حسابات المنصة المدمجة
+    account = BUILTIN_ACCOUNTS.get(email)
+    if account and hmac.compare_digest(password, account["password"]):
+        if not account["active"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Your account is not activated yet. Please contact your administrator.",
+            )
         return {
             "token": issue_token(email),
-            "user": {"email": email, "role": "analyst"},
-            "auth_source": "demo",
+            "user": {"email": email, "name": account["name"], "role": account["role"]},
+            "auth_source": "builtin",
         }
 
     raise HTTPException(status_code=401, detail="Incorrect email or password.")
@@ -985,6 +1026,13 @@ async def debug_config():
             "recipients": len(TEAM_NUMBERS),
             "last_result": LAST_TWILIO,
         },
+        "email": {
+            "configured": bool(SMTP_USER and SMTP_PASSWORD),
+            "recipients": ALERT_EMAILS,
+            "smtp_host": SMTP_HOST,
+            "last_result": LAST_EMAIL,
+        },
+        "traffic_profiles": {k: len(v) for k, v in TRAFFIC_PROFILES.items()},
         "simulator_max_incidents": SIM_MAX_INCIDENTS,
         "status": "Ready",
     }
@@ -992,24 +1040,29 @@ async def debug_config():
 # ===========================================================================
 # 8. DYNAMIC SIMULATOR
 # ===========================================================================
-def synth_features(hot: bool) -> dict:
+def synth_features(profile: str = "normal") -> dict:
     """
-    النموذج مُدرَّب على بيانات مرّت على StandardScaler (متوسط 0، انحراف 1).
-    الفيتشرز الخام السابقة (آلاف وملايين) كانت خارج التوزيع تماماً، فيصنّفها
-    Isolation Forest شذوذاً شديداً في كل مرة — ولهذا كانت أغلب الحوادث Critical.
-    الآن تُولَّد بنفس مقياس التدريب: طبيعية قرب الصفر، وهجومية بانحراف واضح.
-    """
-    out = {}
-    # الهجوم ينحرف في مجموعة من الخصائص فقط، لا في كلها
-    deviating = set(random.sample(FEATURE_KEYS, k=min(12, len(FEATURE_KEYS)))) if hot else set()
-    magnitude = random.uniform(2.5, 4.5) if hot else 0.0
+    العيّنات مأخوذة من بيانات التدريب نفسها (clean_ids2018_processed.csv)
+    بعد المرور على StandardScaler، ومقسّمة على ثلاث شرائح حسب بُعدها عن
+    مركز التوزيع: normal / elevated / anomalous.
 
-    for f in FEATURE_KEYS:
-        value = random.gauss(0, 1)
-        if f in deviating:
-            value += magnitude * random.choice([1, -1])
-        out[f] = round(max(min(value, 8.0), -8.0), 4)
-    return out
+    القيم الخام السابقة (آلاف وملايين) كانت خارج التوزيع الذي تعلّمه النموذج،
+    فيصنّفها Isolation Forest شذوذاً شديداً في كل مرة — ولهذا كانت أغلب
+    الحوادث Critical.
+    """
+    bank = TRAFFIC_PROFILES.get(profile) or TRAFFIC_PROFILES.get("normal") or []
+    if not bank:
+        # احتياطي فقط إذا تعذّر تحميل ملف العيّنات
+        return {f: round(random.gauss(0, 0.6), 5) for f in FEATURE_KEYS}
+
+    sample = list(random.choice(bank))
+    # اهتزاز طفيف حتى لا تتكرر الحادثة حرفياً، دون إخراجها من شريحتها
+    jitter = 0.03
+    return {
+        f: round(sample[i] + random.gauss(0, jitter), 5)
+        for i, f in enumerate(FEATURE_KEYS)
+        if i < len(sample)
+    }
 
 def build_sim_incident() -> IncidentIn:
     # 1. التوزيع العادل لتقليل عدد الـ Critical (2% فقط)
@@ -1019,13 +1072,21 @@ def build_sim_incident() -> IncidentIn:
     
     # 3. تنويع المصادر
     sources = ["EDR", "SIEM", "Firewall", "IDS", "DLP", "SOAR", "Email Gateway", "WAF"]
-    hot = itype in ["ransomware", "ddos", "malware"]
+    # الشريحة التي تُسحب منها الفيتشرز حسب طبيعة النوع
+    # الشذوذ الشديد محجوز للهجمات التي تُحدث انحرافاً حقيقياً في الشبكة.
+    # وضع malware ضمنها كان يرفع نسبة الحوادث الحرجة إلى 20%.
+    profile = (
+        "normal" if itype in ("benign", "phishing")
+        else "anomalous" if itype in ("ransomware", "ddos")
+        else "elevated"
+    )
+    hot = itype in ["ransomware", "ddos"]
     # تدرّج حقيقي في السياق بدل قيمتين فقط، فتتوزع الشدة على المستويات الأربعة
     if itype == "benign":
         crits = ["low"]
     elif itype in ("phishing", "brute_force"):
         crits = ["low", "medium"]
-    elif itype == "insider_threat":
+    elif itype in ("insider_threat", "malware"):
         crits = ["medium", "high"]
     else:
         crits = ["high", "critical"]
@@ -1041,7 +1102,7 @@ def build_sim_incident() -> IncidentIn:
         exposure=random.choice(["internal", "dmz", "internet_facing"]), 
         vulnerability_level=random.choice(crits), 
         business_impact=random.choice(crits),
-        flow_features=synth_features(hot)
+        flow_features=synth_features(profile)
     )
 
 async def simulator_loop():
@@ -1065,6 +1126,104 @@ async def startup_event():
             try: process_incident(build_sim_incident())
             except: pass
     asyncio.create_task(simulator_loop())
+
+@app.get("/api/incidents/template/download")
+async def download_pdf_template():
+    """
+    قالب تقرير الحادثة الجاهز للتعبئة.
+    يحتوي جدول الـ37 خاصية بأسمائها الحرفية كما يتوقعها المستخرج، مع قيم
+    مثال مأخوذة من شريحة الحركة الطبيعية في بيانات التدريب — فيكفي أن يستبدل
+    المحلل القيم بقيمه ويرفع الملف ليعمل النموذج مباشرة.
+    """
+    styles = getSampleStyleSheet()
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, title="SentriX Incident Report Template")
+
+    sample = synth_features("normal")
+
+    story = [
+        Paragraph("SentriX — Incident Report Template", styles["Title"]),
+        Spacer(1, 6),
+        Paragraph(
+            "Fill in the values below and upload this file on the New Incident page. "
+            "Keep the field names exactly as they appear — the analysis engine matches them by name. "
+            "The AI Network Features section is required for machine-learning scoring; "
+            "if any of the 37 values is missing, the incident is scored from organizational context only.",
+            styles["Normal"],
+        ),
+        Spacer(1, 14),
+    ]
+
+    def block(title, rows, widths=(190, 300)):
+        story.append(Paragraph(title, styles["Heading2"]))
+        table = Table(rows, colWidths=list(widths))
+        table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eef2f7")),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.extend([table, Spacer(1, 10)])
+
+    block("1. Incident Information", [
+        ["Incident Type", "ransomware | brute force | ddos | phishing | malware | insider"],
+        ["Source", "EDR"],
+        ["Description", ""],
+    ])
+
+    block("2. Network Information", [
+        ["Protocol", "TCP"],
+        ["Source IP", "45.33.12.8"],
+        ["Destination IP", "10.0.0.15"],
+    ])
+
+    block("3. Asset Information", [
+        ["Asset Type", "Server | Workstation | Database | Network Device"],
+        ["Asset Criticality", "low | medium | high | critical"],
+        ["Exposure", "internal | dmz | internet_facing"],
+        ["Vulnerability", "none | low | medium | high | critical"],
+        ["Business Impact", "low | medium | high | critical"],
+    ])
+
+    story.append(Paragraph(
+        f"4. AI Network Features — all {len(FEATURE_KEYS)} values required",
+        styles["Heading2"]))
+    story.append(Paragraph(
+        "<font size=7 color='#666666'>Values are standardized (StandardScaler) exactly as the "
+        "model was trained. The examples below are a real sample of normal traffic; replace them "
+        "with the values captured for your incident.</font>",
+        styles["Normal"]))
+    story.append(Spacer(1, 4))
+
+    feature_rows = [["Feature", "Value"]] + [
+        [name, str(sample.get(name, ""))] for name in FEATURE_KEYS
+    ]
+    table = Table(feature_rows, colWidths=[250, 240], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dbeafe")),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(table)
+
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        "<font size=7 color='#666666'>SentriX — AI-Powered Threat Investigation &amp; Incident "
+        "Response Platform. Do not rename or reorder the fields.</font>",
+        styles["Normal"]))
+
+    doc.build(story)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="SentriX_Incident_Report_Template.pdf"'},
+    )
+
 
 @app.post("/api/incidents/upload-pdf")
 async def upload_pdf(
@@ -1209,6 +1368,85 @@ async def upload_pdf(
 # ===========================================================================
 # 9. TWILIO
 # ===========================================================================
+def notify_email(pkg: dict) -> dict:
+    """
+    يرسل تنبيهاً بالبريد للحوادث الحرجة فقط.
+    يستخدم SMTP من المكتبة القياسية — بلا أي اعتمادية إضافية.
+    """
+    global LAST_EMAIL
+    risk = pkg["risk"]
+    inc = pkg["incident"]
+
+    if risk["severity"] != "Critical":
+        return {"sent": False, "reason": "severity_not_critical"}
+
+    if not (SMTP_USER and SMTP_PASSWORD and ALERT_EMAILS):
+        missing = [n for n, v in (("SMTP_USER", SMTP_USER), ("SMTP_PASSWORD", SMTP_PASSWORD),
+                                  ("ALERT_EMAILS", ALERT_EMAILS)) if not v]
+        result = {"sent": False, "reason": f"missing_config: {', '.join(missing)}", "at": now_iso()}
+        print(f"[email] skipped — {result['reason']}")
+        LAST_EMAIL = result
+        return result
+
+    threat = pkg.get("threat", {})
+    rec = pkg.get("recommendation", {})
+    actions = "\n".join(f"  {i + 1}. {a['title']}" for i, a in enumerate(rec.get("actions", [])))
+
+    body = f"""SentriX — CRITICAL INCIDENT ALERT
+
+Incident ID : {inc['id']}
+Title       : {inc['title']}
+Type        : {inc['incident_type']}
+Source      : {inc['source']}
+Asset       : {inc['asset_type']} ({inc['asset_criticality']} criticality)
+Detected at : {str(inc['created_at'])[:19]} UTC
+
+Risk score  : {risk['risk_score']} / 100
+Severity    : {risk['severity']}
+Priority    : {risk['priority']} (response SLA {risk['sla_hours']}h)
+Scoring     : {risk['scoring_mode']}
+
+Anomaly score     : {pkg['ai_result']['anomaly_score']}
+Dynamic threshold : {risk['dynamic_threshold']}
+
+MITRE tactics    : {', '.join(threat.get('mitre_tactics') or []) or 'N/A'}
+MITRE techniques : {', '.join(threat.get('mitre_techniques') or []) or 'N/A'}
+
+Recommended playbook: {rec.get('playbook', 'N/A')}
+{actions}
+
+Immediate response required.
+
+--
+SentriX — AI-Powered Threat Investigation & Incident Response Platform
+"""
+
+    try:
+        import smtplib
+        from email.message import EmailMessage
+
+        message = EmailMessage()
+        message["Subject"] = f"[SentriX] CRITICAL — {inc['incident_type']} on {inc['asset_type']} ({inc['id']})"
+        message["From"] = SMTP_FROM
+        message["To"] = ", ".join(ALERT_EMAILS)
+        message.set_content(body)
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(message)
+
+        print(f"[email] sent to {', '.join(ALERT_EMAILS)} for {inc['id']}")
+        result = {"sent": True, "to": ALERT_EMAILS, "incident_id": inc["id"], "at": now_iso()}
+    except Exception as e:
+        # السبب الشائع مع Gmail: لازم App Password لا كلمة المرور العادية
+        print(f"[email] FAILED: {type(e).__name__}: {e}")
+        result = {"sent": False, "reason": f"{type(e).__name__}: {str(e)[:200]}", "at": now_iso()}
+
+    LAST_EMAIL = result
+    return result
+
+
 def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
     """
     كان سبب الفشل يُطبع بسطر واحد بلا تفاصيل، فيصعب معرفة لماذا لا تصل الرسالة.
