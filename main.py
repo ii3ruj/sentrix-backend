@@ -54,9 +54,9 @@ ARCHIVE_STORAGE_BUCKET = os.environ.get("ARCHIVE_STORAGE_BUCKET", "archives")
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
-SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "25"))
-SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "60"))
-MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "200"))
+SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "10"))
+SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "30"))
+MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "40"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
 
 BASE_DIR = Path(__file__).parent
@@ -991,7 +991,7 @@ def synth_features(profile: str = "normal") -> dict:
 
 def build_sim_incident() -> IncidentIn:
     types = ["benign", "phishing", "brute_force", "malware", "ddos", "ransomware", "insider_threat"]
-    weights = [35, 25, 20, 10, 5, 3, 2]
+    weights = [45, 25, 18, 7, 3, 1, 1] 
     itype = random.choices(types, weights=weights)[0]
     
     sources = ["EDR", "SIEM", "Firewall", "IDS", "DLP", "SOAR", "Email Gateway", "WAF"]
@@ -1007,7 +1007,7 @@ def build_sim_incident() -> IncidentIn:
     elif itype in ("insider_threat", "malware"):
         crits = ["medium", "high"]
     else:
-        crits = ["high", "critical"]
+        crits = ["medium", "high"]
     
     return IncidentIn(
         incident_type=itype,
@@ -1017,11 +1017,12 @@ def build_sim_incident() -> IncidentIn:
         destination_ip="10.0.0.5",
         asset_type=random.choice(["Server", "Workstation", "Database", "Network Device", "Cloud Instance"]), 
         asset_criticality=random.choice(crits), 
-        exposure=random.choice(["internal", "dmz", "internet_facing"]), 
+        exposure=random.choice(["internal", "dmz"]), 
         vulnerability_level=random.choice(crits), 
-        business_impact=random.choice(crits),
+        business_impact=random.choice(["low", "medium"]),
         flow_features=synth_features(profile)
     )
+
 
 async def simulator_loop():
     while True:
