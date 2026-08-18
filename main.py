@@ -1754,6 +1754,7 @@ async def upload_pdf(
 
 import requests
 from twilio.rest import Client
+from twilio.twiml.voice_response import VoiceResponse
 
 
 def notify_email(pkg: dict) -> dict:
@@ -1848,12 +1849,14 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
                 results.append({"type": "sms", "sent": False, "code": code,
                                 "to": target_phone, "error": str(e)[:200]})
 
-            # 2. إجراء المكالمة الصوتية باستخدام القالب المضمون والمستقر
+            # 2. إجراء المكالمة ونطق تفاصيل الحادثة الحقيقية بصوت الآلة
             try:
+                response = VoiceResponse()
+                response.say(f"Attention. SentriX Security Alert. Critical {incident_type} detected. Incident reference {ref}. Risk score {risk_score}. Please check your dashboard immediately.", language="en-US", voice="alice")
                 call = client.calls.create(
-                    url="https://webhooks.twilio.com/v1/Voice/Template/voice_auto_response",
+                    twiml=str(response),
                     to=target_phone,
-                    from_=TWILIO_PHONE,
+                    from_=TWILIO_PHONE
                 )
                 print(f"[twilio] call sid={call.sid} to={target_phone} status={call.status}")
                 results.append({"type": "voice", "sent": True, "sid": call.sid,
