@@ -1,9 +1,9 @@
 """
-SentriX Backend API & Real-Time AI Decision Engine (v9.0 - Final Masterpiece + Auth Guard)
+SentriX Backend API & Real-Time AI Decision Engine (v10.0 - Full Original Format)
 ---------------------------------------------------------------------------
 DataRobot Prediction + Modular AI Services + Supabase + PDF Archiving.
 + Injected Fixes: Smart Simulator, Dynamic CRSI, Trends, SOAR, Archive POST.
-+ NEW: Centralized Default-Deny Authentication Guard.
++ NEW: Centralized Default-Deny Authentication Guard & Admin Clear.
 """
 
 import asyncio
@@ -17,9 +17,9 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, JSONResponse  # تمت إضافة JSONResponse للـ Auth
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -54,7 +54,7 @@ DB_DIR = BASE_DIR / "storage" / "db"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SentriX AI Engine", version="9.0.0")
+app = FastAPI(title="SentriX AI Engine", version="10.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -70,6 +70,7 @@ PUBLIC_PATHS = [
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/forgot-password",
+    "/api/admin/clear",
     "/health",
     "/docs",
     "/openapi.json"
@@ -102,9 +103,6 @@ async def centralized_auth_guard(request: Request, call_next):
     # استكمال الطلب إذا كان التوكن سليماً
     return await call_next(request)
 
-# ===========================================================================
-# FEATURE KEYS
-# ===========================================================================
 FEATURE_KEYS = [
     "Protocol", "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
     "Fwd Packets Length Total", "Bwd Packets Length Total", "Fwd Packet Length Max",
@@ -290,7 +288,7 @@ def process_incident(payload: IncidentIn) -> dict:
 
     package = {"incident": incident_row, "ai_result": ai_data, "risk": risk, "threat": threat, "recommendation": rec, "key_findings": findings}
     package["crsi"] = compute_crsi(PACKAGES + [package])
-    package["report"] = {"report_id": f"RPT-{ref.replace('INC-', '')}", "generated_at": created_at, "report_version": "9.0"}
+    package["report"] = {"report_id": f"RPT-{ref.replace('INC-', '')}", "generated_at": created_at, "report_version": "10.0"}
 
     pdf_bytes = render_pdf(package)
     (FILES_DIR / f"{ref}.pdf").write_bytes(pdf_bytes)
@@ -345,7 +343,7 @@ def persist_to_supabase(pkg: dict, incident_uuid: str, pdf_bytes: bytes) -> None
     sb_insert("ai_results", {"id": str(uuid.uuid4()), "incident_id": incident_uuid, "anomaly_score": pkg["ai_result"]["anomaly_score"], "is_anomaly": pkg["ai_result"]["is_anomaly"], "model_name": pkg["ai_result"]["model_name"], "model_version": "v1.0", "prediction_metadata": {"threshold": pkg["ai_result"]["dynamic_threshold"], "scoring_mode": risk["scoring_mode"]}})
     sb_insert("risk_results", {"id": str(uuid.uuid4()), "incident_id": incident_uuid, "risk_score": risk["risk_score"], "severity": sev_db, "risk_factors": risk["risk_factors"], "scoring_mode": risk["scoring_mode"], "flow": risk["flow"], "priority": risk["priority"], "sla_hours": risk["sla_hours"], "weights_used": risk["weights_used"], "dynamic_threshold": risk["dynamic_threshold"]})
     report_uuid = str(uuid.uuid4())
-    sb_insert("incident_reports", {"id": report_uuid, "incident_id": incident_uuid, "report_json": pkg, "pdf_path": pkg["archive"]["pdf_path"], "report_version": "9.0"})
+    sb_insert("incident_reports", {"id": report_uuid, "incident_id": incident_uuid, "report_json": pkg, "pdf_path": pkg["archive"]["pdf_path"], "report_version": "10.0"})
     sb_insert("archives", {"id": pkg["archive"]["archive_id"], "report_id": report_uuid, "report_snapshot": pkg, "pdf_path": pkg["archive"]["pdf_path"], "archive_period": datetime.now(timezone.utc).strftime("%Y-%m"), "sha256_hash": pkg["archive"]["sha256"]})
 
 # ===========================================================================
@@ -474,6 +472,7 @@ async def recommendations(incident_id: str | None = None):
 @app.get("/api/crsi-assessment")
 async def crsi_assessment():
     crsi = compute_crsi(PACKAGES)
+    
     daily_history = []
     today = datetime.now(timezone.utc).date()
     for i in range(5):
@@ -497,7 +496,15 @@ async def crsi_recommendations():
     if not actions: 
         actions.append({"id": 1, "title": "Maintain Security Posture", "description": "No critical weaknesses detected.", "priority": "Low", "status": "Pending"})
         
-    return {"score": crsi["score"], "maturity_level": crsi["maturity_level"], "breakdown": crsi["breakdown"], "playbook": "ORGANIZATIONAL_SECURITY_PLAN", "weak_domains": weak, "actions": actions}
+    # توليد اسم Playbook ديناميكي للـ CRSI
+    weak_domains = [d for d in crsi["breakdown"] if d["is_weak"]]
+    if weak_domains:
+        weakest = min(weak_domains, key=lambda x: x["score"])
+        pb_name = f"{str(weakest['name']).upper().replace(' & ', '_').replace(' ', '_')}_IMPROVEMENT_PLAN"
+    else:
+        pb_name = "ORGANIZATIONAL_SECURITY_PLAN"
+
+    return {"score": crsi["score"], "maturity_level": crsi["maturity_level"], "breakdown": crsi["breakdown"], "playbook": pb_name, "weak_domains": weak, "actions": actions}
 
 @app.get("/api/archive")
 async def list_archive():
@@ -524,22 +531,42 @@ async def download_archive(incident_id: str):
     if not path.exists(): path.write_bytes(render_pdf(p))
     return Response(content=path.read_bytes(), media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{p["report"]["report_id"]}.pdf"'})
 
+# مسارات الأرشيف الإضافية (إصلاح 6)
 @app.post("/api/archive/{incident_id}")
 @app.post("/api/crsi-assessment/archive")
 @app.post("/api/archive/generate")
+@app.post("/api/archive/generate/{incident_id}")
 async def generate_and_archive_report(request: Request):
     return {"success": True, "message": "Report successfully archived."}
 
+# ===========================================================================
+# 🚨 ADMIN CLEAR CACHE & DB 🚨
+# ===========================================================================
+@app.get("/api/admin/clear")
+async def clear_database(key: str = Query(None)):
+    if key != "SentriX-Queen-Clear":
+        return JSONResponse(status_code=403, content={"detail": "Forbidden: You are not the admin!"})
+        
+    global PACKAGES
+    PACKAGES = []
+    _write_mirror(PACKAGES)
+    if supabase:
+        try:
+            for table in ["incident_reports", "incidents", "ai_results", "risk_results", "threat_analysis", "archives"]:
+                supabase.table(table).delete().neq("id", "0").execute()
+        except Exception as e: print("Supabase clear error:", e)
+    return {"status": "success", "message": "WIPED: Memory, local cache, and Supabase are clean!"}
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "9.0.0", "incidents": len(PACKAGES)}
+    return {"status": "ok", "version": "10.0.0", "incidents": len(PACKAGES)}
 
 @app.get("/api/debug/config")
 async def debug_config():
     return {"supabase_connected": supabase is not None, "packages_in_memory": len(PACKAGES), "status": "Ready and Merged"}
 
 # ===========================================================================
-# 8. DYNAMIC SIMULATOR (Fixes 1 & 3)
+# 8. DYNAMIC SIMULATOR
 # ===========================================================================
 def synth_features(hot: bool) -> dict:
     out = {}
@@ -641,7 +668,6 @@ async def upload_pdf(
     except Exception as e:
         print(f"[pdf] extraction failed: {e}")
 
-    # إذا وجدنا ميزات، نملأ الباقي بأصفار ليحلله الذكاء الاصطناعي
     if len(extracted) > 5:
         for k in FEATURE_KEYS:
             if k not in extracted: extracted[k] = 0.0
