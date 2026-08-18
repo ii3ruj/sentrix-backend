@@ -79,6 +79,7 @@ PUBLIC_PATHS = [
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/forgot-password",
+    "/api/debug/config",
     "/api/admin/clear",
     "/health",
     "/docs",
