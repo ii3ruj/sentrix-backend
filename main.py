@@ -1245,6 +1245,199 @@ async def startup_event():
     asyncio.create_task(bootstrap())
     asyncio.create_task(keep_alive_loop())
 
+# ---------------------------------------------------------------------------
+# قالب Word — مبني بمكتبة zipfile القياسية، بلا أي اعتمادية جديدة.
+# ملف .docx هو في الأصل أرشيف ZIP يحتوي XML، لذلك لا حاجة لتنصيب python-docx
+# على Render (وكل اعتمادية إضافية = مخاطرة نشر إضافية).
+# ---------------------------------------------------------------------------
+
+def _xml_escape(text: str) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _docx_paragraph(text: str = "", bold: bool = False, size: int = 20,
+                    color: str = "000000", space_after: int = 120) -> str:
+    runs = ""
+    if text:
+        props = f'<w:b/>' if bold else ''
+        runs = (f'<w:r><w:rPr>{props}<w:sz w:val="{size}"/>'
+                f'<w:color w:val="{color}"/></w:rPr>'
+                f'<w:t xml:space="preserve">{_xml_escape(text)}</w:t></w:r>')
+    return (f'<w:p><w:pPr><w:spacing w:after="{space_after}"/></w:pPr>{runs}</w:p>')
+
+
+def _docx_cell(text: str, width: int, bold: bool = False, shade: str = None) -> str:
+    fill = f'<w:shd w:val="clear" w:fill="{shade}"/>' if shade else ""
+    return (f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{fill}</w:tcPr>'
+            f'{_docx_paragraph(text, bold=bold, size=18, space_after=0)}</w:tc>')
+
+
+def _docx_table(rows, widths, header: bool = True) -> str:
+    borders = ('<w:tblBorders>' + "".join(
+        f'<w:{edge} w:val="single" w:sz="4" w:color="C9CED6"/>'
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV")
+    ) + '</w:tblBorders>')
+
+    body = ""
+    for index, row in enumerate(rows):
+        is_header = header and index == 0
+        cells = "".join(
+            _docx_cell(value, widths[i], bold=is_header,
+                       shade="DBEAFE" if is_header else ("F7F9FC" if i == 0 else None))
+            for i, value in enumerate(row)
+        )
+        body += f"<w:tr>{cells}</w:tr>"
+
+    return (f'<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/>{borders}</w:tblPr>'
+            f'{body}</w:tbl>' + _docx_paragraph(space_after=200))
+
+
+def build_incident_template_docx(values: dict | None = None) -> bytes:
+    """
+    قالب تقرير الحادثة بصيغة Word.
+    values=None يعطي قالباً فارغاً جاهزاً للتعبئة،
+    وتمرير قيم يعطي نسخة معبّأة (تُستخدم في الاختبار والأمثلة).
+    """
+    import zipfile
+    values = values or {}
+
+    parts = [
+        _docx_paragraph("SentriX — Incident Report Template", bold=True, size=32),
+        _docx_paragraph(
+            "Fill in the values below and upload this file on the New Incident page. "
+            "Keep the field names exactly as they appear — the analysis engine matches "
+            "them by name. The AI Network Features section is required for "
+            "machine-learning scoring; if any of the 37 values is missing, the incident "
+            "is scored from organizational context only.",
+            size=18, color="4B5563"),
+
+        _docx_paragraph("1. Incident Information", bold=True, size=24),
+        _docx_table([
+            ["Field", "Value"],
+            ["Incident Type", ""],
+            ["Source", ""],
+            ["Description", ""],
+        ], [3200, 6160]),
+
+        _docx_paragraph("2. Network Information", bold=True, size=24),
+        _docx_table([
+            ["Field", "Value"],
+            ["Protocol", ""],
+            ["Source IP", ""],
+            ["Destination IP", ""],
+        ], [3200, 6160]),
+
+        _docx_paragraph("3. Asset Information", bold=True, size=24),
+        _docx_table([
+            ["Field", "Value"],
+            ["Asset Type", ""],
+            ["Asset Criticality", ""],
+            ["Exposure", ""],
+            ["Vulnerability", ""],
+            ["Business Impact", ""],
+        ], [3200, 6160]),
+
+        _docx_paragraph(f"4. AI Network Features — all {len(FEATURE_KEYS)} values required",
+                        bold=True, size=24),
+        _docx_paragraph(
+            "Values are standardized (StandardScaler) exactly as the model was trained. "
+            "Enter the values captured for your incident.",
+            size=16, color="6B7280"),
+        _docx_table([["Feature", "Value"]] +
+                    [[name, str(values.get(name, ""))] for name in FEATURE_KEYS],
+                    [5200, 4160]),
+
+        _docx_paragraph(
+            "SentriX — AI-Powered Threat Investigation & Incident Response Platform. "
+            "Do not rename or reorder the fields.",
+            size=14, color="9CA3AF"),
+    ]
+
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:body>{"".join(parts)}'
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/>'
+        '</w:sectPr></w:body></w:document>'
+    )
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '</Types>'
+    )
+
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/></Relationships>'
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def extract_docx_pairs(data: bytes) -> tuple[dict, str]:
+    """
+    يقرأ جداول ملف Word ويرجع (الفيتشرز المستخرجة، النص الكامل).
+    ملف .docx أرشيف ZIP، فالقراءة تتم بـzipfile و ElementTree من المكتبة القياسية.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    extracted, lines = {}, []
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        xml_bytes = archive.read("word/document.xml")
+
+    root = ET.fromstring(xml_bytes)
+
+    def cell_text(node) -> str:
+        return "".join(t.text or "" for t in node.iter(f"{{{ns['w']}}}t")).strip()
+
+    for table in root.iter(f"{{{ns['w']}}}tbl"):
+        for row in table.iter(f"{{{ns['w']}}}tr"):
+            cells = [cell_text(c) for c in row.findall(f"{{{ns['w']}}}tc")]
+            if len(cells) < 2:
+                continue
+            lines.append(": ".join(cells[:2]))
+            key = _match_feature(cells[0])
+            if key and key not in extracted:
+                value = _to_number(cells[1])
+                if value is not None:
+                    extracted[key] = value
+
+    for para in root.iter(f"{{{ns['w']}}}p"):
+        text = cell_text(para)
+        if text:
+            lines.append(text)
+
+    return extracted, "\n".join(lines)
+
+
+@app.get("/api/incidents/template/docx/download")
+async def download_docx_template():
+    """قالب Word فارغ — أسهل للتعبئة من الـPDF."""
+    return Response(
+        content=build_incident_template_docx(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition":
+                 'attachment; filename="SentriX_Incident_Report_Template.docx"'},
+    )
+
+
 @app.post("/api/debug/test-alert")
 async def test_alert():
     """
@@ -1400,6 +1593,8 @@ async def upload_pdf(
     src_ip = None
 
     try:
+        if extracted:
+            raise RuntimeError("already parsed as Word")   # يتخطى مسار الـPDF
         import pdfplumber
         tmp = FILES_DIR / f"_tmp_{uuid.uuid4()}.pdf"
         tmp.write_bytes(data)
