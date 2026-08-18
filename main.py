@@ -59,6 +59,10 @@ SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "30"))
 MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "40"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
 
+# Render يضبط RENDER_EXTERNAL_URL تلقائياً؛ يمكن تجاوزه يدوياً بـ KEEP_ALIVE_URL
+KEEP_ALIVE_URL = os.environ.get("KEEP_ALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+KEEP_ALIVE_INTERVAL = int(os.environ.get("KEEP_ALIVE_INTERVAL_SECONDS", "600"))
+
 BASE_DIR = Path(__file__).parent
 FILES_DIR = BASE_DIR / "storage" / "files"
 DB_DIR = BASE_DIR / "storage" / "db"
@@ -99,6 +103,9 @@ BUILTIN_ACCOUNTS = {
                             "name": "SentriX Admin", "active": True},
     "pending@sentrix.com": {"password": DEMO_PASSWORD, "role": "analyst",
                             "name": "Pending Analyst", "active": False},
+    # حساب مفتوح للتجربة — للمشرفين وأي شخص يريد استعراض المنصة
+    "test@sentrix.org.sa": {"password": os.environ.get("TEST_PASSWORD", "Test*123"),
+                            "role": "analyst", "name": "Test User", "active": True},
 }
 
 
@@ -209,6 +216,113 @@ CRSI_DOMAINS = {
     "backup_recovery":  {"name": "Backup & Recovery", "weight": 0.15, "ref": "NIST RC.RP | ISO 27001 A.12.3 | NCA 2-9"},
     "nca_controls":     {"name": "NCA Controls",       "weight": 0.15, "ref": "NCA ECC-1:2018"},
 }
+# توصيات مرجعية لكل مجال، مربوطة بالضوابط المعتمدة.
+# التوصية السابقة كانت سطراً عاماً واحداً ("Review X controls") بلا معايير.
+CRSI_PLAYBOOK = {
+    "identify_access": {
+        "playbook": "IDENTITY_AND_ACCESS_HARDENING_PLAN",
+        "actions": [
+            ("Enforce multi-factor authentication on all privileged accounts",
+             "MFA is the single highest-impact control against credential attacks. Apply it to every administrative and remote-access account.",
+             "NCA ECC-1:2018 2-2-3 | ISO/IEC 27001 A.9.4.2 | NIST CSF PR.AC-7"),
+            ("Run a quarterly access review and revoke stale privileges",
+             "Review every account against the least-privilege principle and remove permissions no longer required by the job role.",
+             "NCA ECC-1:2018 2-2-1 | ISO/IEC 27001 A.9.2.5 | NIST CSF PR.AC-4"),
+            ("Separate administrative accounts from daily-use accounts",
+             "Administrators must hold a distinct privileged identity that is never used for email or browsing.",
+             "NCA ECC-1:2018 2-2-2 | ISO/IEC 27001 A.9.2.3 | NIST CSF PR.AC-6"),
+            ("Enable lockout and alerting on repeated authentication failures",
+             "Lock the account after a defined number of failures and raise an alert to the SOC.",
+             "ISO/IEC 27001 A.9.4.2 | NIST CSF DE.CM-1"),
+        ],
+    },
+    "network_security": {
+        "playbook": "NETWORK_SEGMENTATION_AND_PERIMETER_PLAN",
+        "actions": [
+            ("Segment critical assets away from general user traffic",
+             "Place servers and databases in dedicated segments with explicit allow rules between zones.",
+             "NCA ECC-1:2018 2-5-3 | ISO/IEC 27001 A.13.1.3 | NIST CSF PR.AC-5"),
+            ("Review and clean the firewall rule base",
+             "Remove permissive any-any rules and obsolete entries, and document the business owner of every remaining rule.",
+             "NCA ECC-1:2018 2-5-1 | ISO/IEC 27001 A.13.1.1 | NIST CSF PR.PT-4"),
+            ("Restrict and monitor internet-facing services",
+             "Publish only what must be public, put the rest behind VPN, and log every inbound session.",
+             "NCA ECC-1:2018 2-5-2 | ISO/IEC 27001 A.13.1.2 | NIST CSF DE.CM-1"),
+            ("Enable DDoS protection on public endpoints",
+             "Apply rate limiting and upstream scrubbing for services exposed to the internet.",
+             "NCA ECC-1:2018 2-5-4 | NIST CSF PR.PT-5"),
+        ],
+    },
+    "endpoint_security": {
+        "playbook": "ENDPOINT_PROTECTION_HARDENING_PLAN",
+        "actions": [
+            ("Verify EDR agent coverage across every managed endpoint",
+             "Identify endpoints without a reporting agent — an unmonitored endpoint is an invisible entry point.",
+             "NCA ECC-1:2018 2-3-1 | ISO/IEC 27001 A.12.6.2 | NIST CSF DE.CM-4"),
+            ("Apply a hardened baseline configuration to all endpoints",
+             "Disable unused services and enforce the approved security baseline through group policy.",
+             "NCA ECC-1:2018 2-3-2 | ISO/IEC 27001 A.12.5.1 | NIST CSF PR.IP-1"),
+            ("Enforce application allow-listing on critical systems",
+             "Permit only approved executables to run on servers handling sensitive data.",
+             "NCA ECC-1:2018 2-3-3 | ISO/IEC 27001 A.12.6.2 | NIST CSF PR.PT-3"),
+            ("Close the endpoint patching gap within the defined SLA",
+             "Track time-to-patch per severity and escalate anything exceeding the agreed window.",
+             "NCA ECC-1:2018 2-10-2 | ISO/IEC 27001 A.12.6.1 | NIST CSF ID.RA-1"),
+        ],
+    },
+    "detect_respond": {
+        "playbook": "DETECTION_AND_RESPONSE_IMPROVEMENT_PLAN",
+        "actions": [
+            ("Close detection coverage gaps in the SIEM",
+             "Map current log sources against the MITRE ATT&CK techniques seen in recent incidents and onboard what is missing.",
+             "NCA ECC-1:2018 2-12-1 | ISO/IEC 27001 A.12.4.1 | NIST CSF DE.AE-3"),
+            ("Reduce mean time to detect and mean time to respond",
+             "Measure both metrics per incident and set an improvement target for the next quarter.",
+             "NCA ECC-1:2018 2-13-2 | ISO/IEC 27001 A.16.1.5 | NIST CSF RS.AN-1"),
+            ("Document and test response runbooks for the top incident types",
+             "Every recurring incident type needs an approved, rehearsed runbook rather than ad-hoc handling.",
+             "NCA ECC-1:2018 2-13-1 | ISO/IEC 27001 A.16.1.1 | NIST CSF RS.RP-1"),
+            ("Retain security logs for the mandated retention period",
+             "Logs must remain available and tamper-evident for the period required by regulation.",
+             "NCA ECC-1:2018 2-12-3 | ISO/IEC 27001 A.12.4.2 | NIST CSF PR.PT-1"),
+        ],
+    },
+    "backup_recovery": {
+        "playbook": "BACKUP_AND_RECOVERY_ASSURANCE_PLAN",
+        "actions": [
+            ("Keep at least one backup copy offline and immutable",
+             "Ransomware targets connected backups first; an isolated copy is what makes recovery possible.",
+             "NCA ECC-1:2018 2-9-3 | ISO/IEC 27001 A.12.3.1 | NIST CSF PR.IP-4"),
+            ("Perform a documented restore test for critical systems",
+             "An untested backup is an assumption. Test the restore and record the recovery time achieved.",
+             "NCA ECC-1:2018 2-9-2 | ISO/IEC 27001 A.17.1.3 | NIST CSF RC.RP-1"),
+            ("Define and approve RTO and RPO for every critical service",
+             "Recovery objectives must be agreed with the business owner, not assumed by IT.",
+             "NCA ECC-1:2018 2-9-1 | ISO/IEC 27001 A.17.1.1 | NIST CSF RC.CO-3"),
+            ("Encrypt backup media at rest and in transit",
+             "Backups carry the same data classification as production and need the same protection.",
+             "ISO/IEC 27001 A.10.1.1 | NIST CSF PR.DS-1"),
+        ],
+    },
+    "nca_controls": {
+        "playbook": "NCA_ECC_COMPLIANCE_PLAN",
+        "actions": [
+            ("Run a gap assessment against the NCA Essential Cybersecurity Controls",
+             "Assess all ECC domains, record the compliance level of each control, and assign an owner to every gap.",
+             "NCA ECC-1:2018 1-1-1 | ISO/IEC 27001 A.18.2.2 | NIST CSF ID.GV-3"),
+            ("Deliver role-based security awareness training",
+             "Target the departments most exposed to phishing and social engineering, and measure the result.",
+             "NCA ECC-1:2018 1-6-1 | ISO/IEC 27001 A.7.2.2 | NIST CSF PR.AT-1"),
+            ("Approve and publish the cybersecurity policy set",
+             "Policies must be formally approved by senior management and communicated to all staff.",
+             "NCA ECC-1:2018 1-3-1 | ISO/IEC 27001 A.5.1.1 | NIST CSF ID.GV-1"),
+            ("Include cybersecurity requirements in third-party contracts",
+             "Suppliers with access to systems or data must be bound by the same control expectations.",
+             "NCA ECC-1:2018 4-1-2 | ISO/IEC 27001 A.15.1.2 | NIST CSF ID.SC-3"),
+        ],
+    },
+}
+
 CRSI_PENALTY = {"Critical": 12.0, "High": 7.0, "Medium": 3.0, "Low": 0.0}
 CRSI_SPILLOVER = 0.20
 CRSI_WINDOW = 20
@@ -764,24 +878,70 @@ async def crsi_recommendations():
     crsi = compute_crsi(PACKAGES)
     weak = [d["name"] for d in crsi["breakdown"] if d["is_weak"]]
     
-    actions = []
-    idx = 1
-    for d in crsi["breakdown"]:
-        if d["is_weak"]:
-            actions.append({"id": idx, "title": f"Review {d['name']} controls", "description": f"Domain score is low ({d['score']}/100). Check {d['control_reference']}", "priority": "High", "status": "Pending"})
+    # التوصيات مشتقة من ضوابط NCA ECC و ISO/IEC 27001 و NIST CSF،
+    # ومرتبة حسب أضعف المجالات فعلياً. عدد التوصيات يتبع درجة المجال.
+    ordered = sorted(crsi["breakdown"], key=lambda d: d["score"])
+
+    def depth(score):
+        if score < 40:   return 4, "High"
+        if score < 60:   return 3, "High"
+        if score < 75:   return 2, "Medium"
+        return 1, "Low"
+
+    actions, idx = [], 1
+    for domain in ordered:
+        book = CRSI_PLAYBOOK.get(domain["domain_key"])
+        if not book:
+            continue
+        count, priority = depth(domain["score"])
+        if domain["score"] >= 85 and len(actions) >= 4:
+            continue
+        for title, description, reference in book["actions"][:count]:
+            actions.append({
+                "id": idx,
+                "title": title,
+                "description": description,
+                "domain": domain["name"],
+                "domain_score": domain["score"],
+                "control_reference": reference,
+                "frameworks": [part.strip() for part in reference.split("|")],
+                "priority": priority,
+                "status": "Pending",
+            })
             idx += 1
-            
-    if not actions: 
-        actions.append({"id": 1, "title": "Maintain Security Posture", "description": "No critical weaknesses detected.", "priority": "Low", "status": "Pending"})
-        
+        if len(actions) >= 12:
+            break
+
+    if not actions:
+        actions.append({
+            "id": 1,
+            "title": "Maintain the current security posture",
+            "description": "No weak control domains were identified in the current assessment window. "
+                           "Keep the periodic review cycle and the awareness programme running.",
+            "domain": "Organizational",
+            "control_reference": "NCA ECC-1:2018 1-1-1 | ISO/IEC 27001 A.18.2.2 | NIST CSF ID.GV-3",
+            "frameworks": ["NCA ECC-1:2018 1-1-1", "ISO/IEC 27001 A.18.2.2", "NIST CSF ID.GV-3"],
+            "priority": "Low",
+            "status": "Pending",
+        })
+
     weak_domains = [d for d in crsi["breakdown"] if d["is_weak"]]
     if weak_domains:
         weakest = min(weak_domains, key=lambda x: x["score"])
-        pb_name = f"{str(weakest['name']).upper().replace(' & ', '_').replace(' ', '_')}_IMPROVEMENT_PLAN"
+        book = CRSI_PLAYBOOK.get(weakest["domain_key"])
+        pb_name = book["playbook"] if book else "ORGANIZATIONAL_SECURITY_PLAN"
     else:
         pb_name = "ORGANIZATIONAL_SECURITY_PLAN"
 
-    return {"score": crsi["score"], "maturity_level": crsi["maturity_level"], "breakdown": crsi["breakdown"], "playbook": pb_name, "weak_domains": weak, "actions": actions}
+    return {
+        "score": crsi["score"],
+        "maturity_level": crsi["maturity_level"],
+        "breakdown": crsi["breakdown"],
+        "playbook": pb_name,
+        "weak_domains": weak,
+        "frameworks": ["NCA ECC-1:2018", "ISO/IEC 27001:2022", "NIST CSF 2.0"],
+        "actions": actions,
+    }
 
 @app.get("/api/archive")
 async def list_archive():
@@ -1036,14 +1196,103 @@ async def simulator_loop():
         except Exception as e:
             pass
 
-@app.on_event("startup")
-async def startup_event():
-    hydrate_from_supabase()
+async def keep_alive_loop():
+    """
+    خطة Render المجانية توقف الخدمة بعد 15 دقيقة خمول، وأول طلب بعدها
+    يستغرق 30-50 ثانية — وهذا سبب بطء الاستجابة بعد كل إعادة تشغيل.
+    نداء ذاتي دوري يبقيها مستيقظة طوال فترة العرض.
+    """
+    if not KEEP_ALIVE_URL:
+        print("[keepalive] disabled — RENDER_EXTERNAL_URL not set")
+        return
+
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.to_thread(
+                requests.get, f"{KEEP_ALIVE_URL.rstrip('/')}/health", timeout=15
+            )
+        except Exception as e:
+            print(f"[keepalive] ping failed: {e}")
+        await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+
+
+async def bootstrap():
+    """
+    كل ما يحتاج شبكة يعمل هنا بعد ربط المنفذ، لا داخل startup.
+    استدعاء hydrate_from_supabase داخل startup كان يؤخر استجابة الخدمة
+    بعد كل إعادة تشغيل حتى يرد Supabase.
+    """
+    try:
+        await asyncio.to_thread(hydrate_from_supabase)
+    except Exception as e:
+        print(f"[startup] hydrate failed: {e}")
+
     if not PACKAGES:
         for _ in range(3):
-            try: process_incident(build_sim_incident())
-            except: pass
-    asyncio.create_task(simulator_loop())
+            try:
+                await asyncio.to_thread(process_incident, build_sim_incident())
+            except Exception as e:
+                print(f"[startup] seed failed: {e}")
+            await asyncio.sleep(0.5)
+
+    await simulator_loop()
+
+
+@app.on_event("startup")
+async def startup_event():
+    # يرجع فوراً حتى يُربط المنفذ بسرعة ولا يفشل النشر
+    asyncio.create_task(bootstrap())
+    asyncio.create_task(keep_alive_loop())
+
+@app.post("/api/debug/test-alert")
+async def test_alert():
+    """
+    يجرّب SMS والمكالمة والبريد فوراً بحادثة وهمية، ويرجع نتيجة كل قناة
+    مع رمز الخطأ — بدل انتظار حادثة حرجة حقيقية لمعرفة سبب الفشل.
+    """
+    sample = {
+        "incident": {
+            "id": "TEST-0000",
+            "title": "Twilio delivery test",
+            "incident_type": "test",
+            "source": "Diagnostics",
+            "asset_type": "Server",
+            "asset_criticality": "critical",
+            "created_at": now_iso(),
+        },
+        "risk": {
+            "severity": "Critical", "risk_score": 99, "priority": "P1",
+            "sla_hours": 1, "dynamic_threshold": 0.1167,
+        },
+        "ai_result": {"anomaly_score": 0.99},
+        "threat": {"mitre_techniques": ["T1486"]},
+        "recommendation": {"playbook": "TEST_PLAYBOOK", "actions": []},
+    }
+
+    sms_and_call = notify_twilio("TEST-0000", "Critical", "test", 99)
+    email = notify_email(sample)
+
+    return {
+        "config": {
+            "TWILIO_SID": bool(TWILIO_SID),
+            "TWILIO_TOKEN": bool(TWILIO_TOKEN),
+            "TWILIO_PHONE": TWILIO_PHONE or None,
+            "TEAM_NUMBERS": TEAM_NUMBERS,
+            "TWILIO_FROM_EMAIL": TWILIO_FROM_EMAIL or None,
+            "ALERT_EMAILS": ALERT_EMAILS,
+        },
+        "sms_and_voice": sms_and_call,
+        "email": email,
+        "hint": (
+            "code 21608 = رقم غير موثّق في الحساب التجريبي · "
+            "21408 = الإرسال إلى المنطقة معطّل (Geo Permissions) · "
+            "21606 = رقم المُرسِل لا يدعم SMS · "
+            "20003 = مفاتيح خاطئة أو الرصيد نفد · "
+            "email 403 = عنوان المُرسِل غير موثّق في Twilio"
+        ),
+    }
+
 
 @app.get("/api/incidents/template/download")
 async def download_pdf_template():
@@ -1215,13 +1464,17 @@ async def upload_pdf(
                         return opt
         return default
 
+    # القيم الافتراضية كانت high/internet_facing/high/high، فأي ملف لا يُقرأ
+    # منه شيء يخرج بدرجة ~98 = Critical بينما النموذج لم يعمل أصلاً
+    # (فتظهر الحادثة Critical و"Pending" في صفحة التحليل معاً).
+    # الافتراضي الآن medium، ولا تُرفع القيم إلا إذا نصّ عليها التقرير.
     asset_criticality = pick(["asset criticality", "criticality"],
-                            ["critical", "high", "medium", "low"], "high")
+                            ["critical", "high", "medium", "low"], "medium")
     exposure = pick(["exposure"], ["internet_facing", "internet facing", "dmz", "internal"],
-                    "internet_facing" if itype in ("ddos", "ransomware") else "internal")
+                    "internal")
     exposure = exposure.replace("internet facing", "internet_facing")
-    vulnerability_level = pick(["vulnerability"], ["critical", "high", "medium", "low", "none"], "high")
-    business_impact = pick(["business impact", "impact"], ["critical", "high", "medium", "low"], "high")
+    vulnerability_level = pick(["vulnerability"], ["critical", "high", "medium", "low", "none"], "medium")
+    business_impact = pick(["business impact", "impact"], ["critical", "high", "medium", "low"], "medium")
 
     asset_type = "Server"
     for candidate in ("workstation", "database", "network device", "cloud instance", "server"):
@@ -1260,6 +1513,12 @@ async def upload_pdf(
             f"scored from organizational context only."
         ),
         "detected_incident_type": itype,
+        "scoring_mode": result["risk"]["scoring_mode"],
+        "severity": result["risk"]["severity"],
+        "context_used": {
+            "asset_criticality": asset_criticality, "exposure": exposure,
+            "vulnerability_level": vulnerability_level, "business_impact": business_impact,
+        },
         "uploaded_sha256": sha256_of(data),
         "client_sha256": sha256,
         "analyst": analyst,
@@ -1285,8 +1544,12 @@ def notify_email(pkg: dict) -> dict:
             LAST_EMAIL = result
             return result
 
-        if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL and ALERT_EMAILS):
-            result = {"sent": False, "reason": "missing_config"}
+        missing = [n for n, v in (("TWILIO_SID", TWILIO_SID), ("TWILIO_TOKEN", TWILIO_TOKEN),
+                                  ("TWILIO_FROM_EMAIL", TWILIO_FROM_EMAIL),
+                                  ("ALERT_EMAILS", ALERT_EMAILS)) if not v]
+        if missing:
+            result = {"sent": False, "reason": f"missing_config: {', '.join(missing)}"}
+            print(f"[email] skipped — {result['reason']}")
             LAST_EMAIL = result
             return result
 
@@ -1309,9 +1572,18 @@ def notify_email(pkg: dict) -> dict:
             },
             timeout=10
         )
-        result = {"sent": response.status_code in (200, 201, 202), "status": response.status_code}
+        ok = response.status_code in (200, 201, 202)
+        if not ok:
+            # 401 مفاتيح خاطئة · 403 عنوان المُرسِل غير موثّق في Twilio
+            print(f"[email] FAILED {response.status_code}: {response.text[:300]}")
+        else:
+            print(f"[email] sent to {', '.join(ALERT_EMAILS)} ({response.status_code})")
+        result = {"sent": ok, "status": response.status_code,
+                  "to": ALERT_EMAILS,
+                  "error": None if ok else response.text[:300]}
     except Exception as e:
-        result = {"sent": False, "error": str(e)[:200]}
+        print(f"[email] FAILED: {type(e).__name__}: {e}")
+        result = {"sent": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     LAST_EMAIL = result
     return result
@@ -1323,11 +1595,21 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         if severity != "Critical":
             return {"sent": False, "reason": "severity_not_critical"}
 
-        if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE):
-            return {"sent": False, "reason": "missing_config"}
+        missing = [n for n, v in (("TWILIO_SID", TWILIO_SID), ("TWILIO_TOKEN", TWILIO_TOKEN),
+                                  ("TWILIO_PHONE", TWILIO_PHONE)) if not v]
+        if missing:
+            reason = f"missing_config: {', '.join(missing)}"
+            print(f"[twilio] skipped — {reason}")
+            return {"sent": False, "reason": reason}
+
+        target_phones = TEAM_NUMBERS or []
+        if not target_phones:
+            # كانت الحلقة تُتخطى بصمت فيظهر sent=False بلا أي سبب
+            reason = "missing_config: TEAM_NUMBERS is empty"
+            print(f"[twilio] skipped — {reason}")
+            return {"sent": False, "reason": reason}
 
         client = Client(TWILIO_SID, TWILIO_TOKEN)
-        target_phones = TEAM_NUMBERS or []
         results = []
 
         sms_body = f"SentriX Alert: Critical {incident_type} detected. ID: {ref}. Risk: {risk_score}."
@@ -1335,17 +1617,29 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         for target_phone in target_phones:
             try:
                 message = client.messages.create(to=target_phone, from_=TWILIO_PHONE, body=sms_body)
-                results.append({"type": "sms", "sent": True, "sid": message.sid, "to": target_phone})
+                print(f"[twilio] sms sid={message.sid} to={target_phone} status={message.status}")
+                results.append({"type": "sms", "sent": True, "sid": message.sid,
+                                "status": message.status, "to": target_phone})
             except Exception as e:
-                results.append({"type": "sms", "sent": False, "error": str(e)[:150]})
+                # 21608 رقم غير موثّق (حساب تجريبي) · 21408 المنطقة معطّلة
+                # 21606 المُرسِل لا يدعم SMS · 20003 الرصيد نفد أو المفاتيح خاطئة
+                code = getattr(e, "code", None)
+                print(f"[twilio] sms FAILED to={target_phone} code={code}: {e}")
+                results.append({"type": "sms", "sent": False, "code": code,
+                                "to": target_phone, "error": str(e)[:200]})
 
             try:
                 response = VoiceResponse()
                 response.say(f"SentriX Security Alert. Critical incident {ref} detected. Please check dashboard.", language="en-US")
                 call = client.calls.create(twiml=str(response), to=target_phone, from_=TWILIO_PHONE)
-                results.append({"type": "voice", "sent": True, "sid": call.sid, "to": target_phone})
+                print(f"[twilio] call sid={call.sid} to={target_phone} status={call.status}")
+                results.append({"type": "voice", "sent": True, "sid": call.sid,
+                                "status": call.status, "to": target_phone})
             except Exception as e:
-                results.append({"type": "voice", "sent": False, "error": str(e)[:150]})
+                code = getattr(e, "code", None)
+                print(f"[twilio] voice FAILED to={target_phone} code={code}: {e}")
+                results.append({"type": "voice", "sent": False, "code": code,
+                                "to": target_phone, "error": str(e)[:200]})
 
         result = {"sent": any(item.get("sent") is True for item in results), "results": results}
     except Exception as e:
