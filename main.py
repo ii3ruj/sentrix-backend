@@ -321,7 +321,41 @@ def hydrate_from_supabase() -> None:
             _write_mirror(PACKAGES)
     except Exception as e: print(f"[supabase] hydrate failed: {e}")
 
-def next_incident_ref() -> str: return f"INC-{len(PACKAGES) + 1:04d}"
+def next_incident_ref() -> str:
+    """
+    كان الترقيم يعتمد على len(PACKAGES)، فيعيد البدء من INC-0001 بعد كل
+    إعادة نشر (القرص مؤقت) وعند بلوغ سقف الذاكرة — فتتكرر المعرّفات
+    وتفتح الروابط على حادثة غير موجودة ("Incident not found").
+    الآن يُشتق الرقم من أعلى معرّف موجود فعلاً.
+    """
+    highest = 0
+    for pkg in PACKAGES:
+        match = re.match(r"^INC-(\d+)$", str((pkg.get("incident") or {}).get("id") or ""))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"INC-{highest + 1:04d}"
+
+
+def find_package(incident_id: str):
+    """مطابقة متسامحة: المعرّف الكامل أو الـuuid أو رقم التقرير أو الرقم وحده."""
+    wanted = str(incident_id or "").strip().upper()
+    if not wanted:
+        return None
+    for pkg in PACKAGES:
+        inc = pkg.get("incident") or {}
+        candidates = {
+            str(inc.get("id") or "").upper(),
+            str(inc.get("uuid") or "").upper(),
+            str((pkg.get("report") or {}).get("report_id") or "").upper(),
+        }
+        if wanted in candidates:
+            return pkg
+    if wanted.isdigit():
+        padded = f"INC-{int(wanted):04d}"
+        for pkg in PACKAGES:
+            if str((pkg.get("incident") or {}).get("id") or "").upper() == padded:
+                return pkg
+    return None
 def now_iso() -> str: return datetime.now(timezone.utc).isoformat()
 def sha256_of(data: bytes) -> str: return hashlib.sha256(data).hexdigest()
 def canonical_json(obj) -> bytes: return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
@@ -676,8 +710,8 @@ async def create_incident(payload: IncidentIn):
 
 @app.get("/api/incidents/{incident_id}")
 async def get_incident(incident_id: str):
-    p = next((pkg for pkg in PACKAGES if incident_id in (pkg["incident"]["id"], pkg["incident"].get("uuid"))), None)
-    if not p: raise HTTPException(404, "Incident not found")
+    p = find_package(incident_id)
+    if not p: raise HTTPException(404, f"Incident {incident_id} not found")
     return {
         **p["incident"], "risk_score": p["risk"]["risk_score"], "severity": p["risk"]["severity"], "priority": p["risk"]["priority"], "sla_hours": p["risk"]["sla_hours"],
         "scoring_mode": p["risk"]["scoring_mode"], "flow": p["risk"]["flow"], "risk_factors": p["risk"]["risk_factors"], "anomaly_score": p["ai_result"]["anomaly_score"],
@@ -689,8 +723,8 @@ async def get_incident(incident_id: str):
 
 @app.get("/api/ai-analysis/{incident_id}")
 async def ai_analysis(incident_id: str):
-    p = next((pkg for pkg in PACKAGES if incident_id == pkg["incident"]["id"]), None)
-    if not p: raise HTTPException(404, "Not found")
+    p = find_package(incident_id)
+    if not p: raise HTTPException(404, f"Incident {incident_id} not found")
     return {
         "incident_id": p["incident"]["id"], "incident_title": p["incident"]["title"], "severity": p["risk"]["severity"], "risk_score": p["risk"]["risk_score"],
         "risk_detected": p["risk"]["flow"] == "full_path", "analysis_id": f"AI-ANL-{p['incident']['id']}", "model_used": p["ai_result"]["model_name"],
@@ -701,7 +735,7 @@ async def ai_analysis(incident_id: str):
 
 @app.get("/api/recommendations")
 async def recommendations(incident_id: str | None = None):
-    p = next((pkg for pkg in PACKAGES if incident_id == pkg["incident"]["id"]), PACKAGES[0] if PACKAGES else None)
+    p = find_package(incident_id) or (PACKAGES[0] if PACKAGES else None)
     if not p: return {"playbook": "NO_INCIDENTS", "actions": [], "score": 0}
     return {"incident_id": p["incident"]["id"], "title": p["incident"]["title"], "severity": p["risk"]["severity"], "riskScore": p["risk"]["risk_score"], "playbook": p["recommendation"]["playbook"], "actions": p["recommendation"]["actions"]}
 
@@ -771,8 +805,8 @@ async def list_archive():
 
 @app.post("/api/archive/verify/{incident_id}")
 async def verify_archive(incident_id: str):
-    p = next((pkg for pkg in PACKAGES if incident_id == pkg["incident"]["id"]), None)
-    if not p: raise HTTPException(404, "Not found")
+    p = find_package(incident_id)
+    if not p: raise HTTPException(404, f"Archive record for {incident_id} not found")
     # يُعاد حساب البصمة فعلياً ثم تُقارن بالمخزّنة.
     # نستثني المفتاحين اللذين أُضيفا بعد لحظة الحساب: archive و notification.
     snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification", "persistence")}
@@ -788,8 +822,8 @@ async def verify_archive(incident_id: str):
 
 @app.get("/api/archive/{incident_id}/download")
 async def download_archive(incident_id: str):
-    p = next((pkg for pkg in PACKAGES if incident_id == pkg["incident"]["id"]), None)
-    if not p: raise HTTPException(404, "Not found")
+    p = find_package(incident_id)
+    if not p: raise HTTPException(404, f"Incident {incident_id} not found")
     path = FILES_DIR / f"{p['incident']['id']}.pdf"
     if not path.exists(): path.write_bytes(render_pdf(p))
     return Response(content=path.read_bytes(), media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{p["report"]["report_id"]}.pdf"'})
