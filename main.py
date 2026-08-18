@@ -503,6 +503,75 @@ async def startup_event():
             except: pass
     asyncio.create_task(simulator_loop())
 
+@app.post("/api/incidents/upload-pdf")
+async def upload_pdf(
+    file: UploadFile = File(...),
+    incident_id: str = Form(None),
+    actual_time: str = Form(None),
+    analyst: str = Form(None),
+    sha256: str = Form(None),
+):
+    data = await file.read()
+    extracted: dict = {}
+    itype = "malware"
+    src_ip = None
+
+    try:
+        import pdfplumber
+        tmp = FILES_DIR / f"_tmp_{uuid.uuid4()}.pdf"
+        tmp.write_bytes(data)
+        try:
+            with pdfplumber.open(tmp) as pdf:
+                text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+                for page in pdf.pages:
+                    for tbl in page.extract_tables():
+                        for row in tbl:
+                            if row and len(row) >= 2 and row[0] and str(row[0]).strip() in FEATURE_KEYS:
+                                try:
+                                    extracted[str(row[0]).strip()] = float(str(row[1]).strip())
+                                except:
+                                    pass
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        if "Protocol" not in extracted:
+            upper = text.upper()
+            for name, num in (("TCP", 6), ("UDP", 17), ("ICMP", 1)):
+                if name in upper:
+                    extracted["Protocol"] = num
+                    break
+
+        lower = text.lower()
+        for candidate in ("ransomware", "brute force", "ddos", "phishing", "malware", "insider"):
+            if candidate in lower:
+                itype = candidate.replace(" ", "_").replace("insider", "insider_threat")
+                break
+
+        import re
+        m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", text)
+        if m:
+            src_ip = m.group(1)
+    except Exception as e:
+        print(f"[pdf] extraction failed: {e}")
+
+    complete = features_complete(extracted)
+
+    payload = IncidentIn(
+        title=f"Incident report — {file.filename}",
+        incident_type=itype,
+        source="PDF Report",
+        input_method="pdf",
+        source_ip=src_ip,
+        asset_type="Server",
+        asset_criticality="high",
+        exposure="internet_facing" if itype in ("ddos", "ransomware") else "internal",
+        vulnerability_level="high",
+        business_impact="high",
+        flow_features=extracted if complete else None,
+    )
+
+    result = process_incident(payload)
+    return result
 
 # ===========================================================================
 # 9. TWILIO
