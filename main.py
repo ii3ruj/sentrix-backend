@@ -1182,35 +1182,23 @@ def build_sim_incident() -> IncidentIn:
     weights = [45, 25, 18, 7, 3, 1, 1] 
     itype = random.choices(types, weights=weights)[0]
     
-    sources = ["EDR", "SIEM", "Firewall", "IDS", "DLP", "SOAR", "Email Gateway", "WAF"]
-    profile = (
-        "normal" if itype in ("benign", "phishing")
-        else "anomalous" if itype in ("ransomware", "ddos")
-        else "elevated"
-    )
-    if itype == "benign":
-        crits = ["low"]
-    elif itype in ("phishing", "brute_force"):
-        crits = ["low", "medium"]
-    elif itype in ("insider_threat", "malware"):
-        crits = ["medium", "high"]
-    else:
-        crits = ["medium", "high"]
-    
+    # ضمان أن الـ timestamp صادر باللحظة الحالية ليوم 19-8
+    current_time_str = datetime.now(timezone.utc).isoformat()
+
     return IncidentIn(
+        title=f"Auto Simulated {itype.replace('_', ' ').title()}",
         incident_type=itype,
-        source=random.choice(sources),
+        source="Automated Simulator",
         input_method="server",
         source_ip=f"{random.randint(11,220)}.{random.randint(0, 255)}.{random.randint(0, 255)}.1", 
         destination_ip="10.0.0.5",
         asset_type=random.choice(["Server", "Workstation", "Database", "Network Device", "Cloud Instance"]), 
-        asset_criticality=random.choice(crits), 
-        exposure=random.choice(["internal", "dmz"]), 
-        vulnerability_level=random.choice(crits), 
-        business_impact=random.choice(["low", "medium"]),
-        flow_features=synth_features(profile)
+        asset_criticality=random.choice(["low", "medium", "high"]), 
+        exposure="internal", 
+        vulnerability_level=random.choice(["low", "medium"]), 
+        business_impact="medium",
+        flow_features=synth_features("normal")
     )
-
 
 async def simulator_loop():
     while True:
