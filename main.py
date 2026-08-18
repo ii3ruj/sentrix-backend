@@ -1,8 +1,9 @@
 """
-SentriX Backend API & Real-Time AI Decision Engine (v9.0 - Final Masterpiece)
+SentriX Backend API & Real-Time AI Decision Engine (v9.0 - Final Masterpiece + Auth Guard)
 ---------------------------------------------------------------------------
 DataRobot Prediction + Modular AI Services + Supabase + PDF Archiving.
 + Injected Fixes: Smart Simulator, Dynamic CRSI, Trends, SOAR, Archive POST.
++ NEW: Centralized Default-Deny Authentication Guard.
 """
 
 import asyncio
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse  # تمت إضافة JSONResponse للـ Auth
 from pydantic import BaseModel
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -62,6 +63,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ===========================================================================
+# 🚨 CENTRALIZED DEFAULT-DENY AUTHENTICATION GUARD 🚨
+# ===========================================================================
+PUBLIC_PATHS = [
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/forgot-password",
+    "/health",
+    "/docs",
+    "/openapi.json"
+]
+
+@app.middleware("http")
+async def centralized_auth_guard(request: Request, call_next):
+    path = request.url.path
+    
+    # 1. السماح للمسارات العامة بالمرور بدون توكن
+    if any(path.startswith(p) for p in PUBLIC_PATHS) or not path.startswith("/api/"):
+        return await call_next(request)
+    
+    # 2. التحقق من وجود التوكن (JWT)
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized: Missing or invalid token."})
+    
+    token = auth_header.split(" ")[1]
+    
+    # 3. التحقق من صحة التوكن عبر Supabase (Server-side validation)
+    try:
+        if supabase:
+            user = supabase.auth.get_user(jwt=token)
+            if not user:
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized: Invalid session."})
+    except Exception as e:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized: Session expired or invalid."})
+
+    # استكمال الطلب إذا كان التوكن سليماً
+    return await call_next(request)
+
+# ===========================================================================
+# FEATURE KEYS
+# ===========================================================================
 FEATURE_KEYS = [
     "Protocol", "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
     "Fwd Packets Length Total", "Bwd Packets Length Total", "Fwd Packet Length Max",
@@ -86,7 +129,6 @@ CRSI_DOMAINS = {
     "backup_recovery":  {"name": "Backup & Recovery", "weight": 0.15, "ref": "NIST RC.RP | ISO 27001 A.12.3 | NCA 2-9"},
     "nca_controls":     {"name": "NCA Controls",      "weight": 0.15, "ref": "NCA ECC-1:2018"},
 }
-# تم زيادة العقوبة للحادث الخطير ليتفاعل السكور بسرعة ويهبط للأحمر (إصلاح 5)
 CRSI_PENALTY = {"Critical": 25.0, "High": 12.0, "Medium": 4.0, "Low": 0.0}
 CRSI_SPILLOVER = 0.30
 CRSI_WINDOW = 20
@@ -197,7 +239,6 @@ def process_incident(payload: IncidentIn) -> dict:
             })
         except Exception as e: print(f"[datarobot modular error] {e}")
 
-    # إصلاح مشكلة ثبات الـ Risk للـ Simulator
     if payload.input_method == "server":
         if itype == "benign": severity, score = "Low", random.randint(10, 24)
         elif itype in ["phishing", "brute_force"]: severity, score = "Medium", random.randint(25, 49)
@@ -230,7 +271,6 @@ def process_incident(payload: IncidentIn) -> dict:
         "failed_domains": MITRE_MAP.get(itype, MITRE_MAP["_default"])["domains"]
     }
 
-    # حل مشكلة Playbooks الثابتة (إصلاح 4)
     pb_data = PLAYBOOKS.get(itype, PLAYBOOKS["_default"])
     rec_actions = [{"id": i+1, "title": a[0], "description": a[1], "priority": a[2].capitalize(), "status": "Pending", "action_order": i+1} for i, a in enumerate(pb_data["actions"])]
     rec = {"playbook": pb_data["name"], "is_fallback": False, "actions": rec_actions}
@@ -366,7 +406,6 @@ async def dashboard_stats():
         if s in sev: sev[s] += 1
     analyzed = sum(1 for p in PACKAGES if p["ai_result"]["anomaly_score"] is not None)
     
-    # حل مشكلة ثبات الأسهم (إصلاح 2)
     now = datetime.now(timezone.utc)
     def in_window(p, start_h, end_h):
         try:
@@ -435,8 +474,6 @@ async def recommendations(incident_id: str | None = None):
 @app.get("/api/crsi-assessment")
 async def crsi_assessment():
     crsi = compute_crsi(PACKAGES)
-    
-    # حل مشكلة التواريخ الثابتة في الداشبورد للـ CRSI
     daily_history = []
     today = datetime.now(timezone.utc).date()
     for i in range(5):
@@ -487,7 +524,6 @@ async def download_archive(incident_id: str):
     if not path.exists(): path.write_bytes(render_pdf(p))
     return Response(content=path.read_bytes(), media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{p["report"]["report_id"]}.pdf"'})
 
-# مسارات وهمية لحل مشكلة Generate & Archive Report (إصلاح 6)
 @app.post("/api/archive/{incident_id}")
 @app.post("/api/crsi-assessment/archive")
 @app.post("/api/archive/generate")
@@ -501,50 +537,6 @@ async def health():
 @app.get("/api/debug/config")
 async def debug_config():
     return {"supabase_connected": supabase is not None, "packages_in_memory": len(PACKAGES), "status": "Ready and Merged"}
-
-from fastapi import Request
-from fastapi.responses import JSONResponse
-
-# 1. قائمة المسارات العامة المسموح بها بدون تسجيل دخول
-PUBLIC_PATHS = [
-    "/api/auth/login",
-    "/api/auth/register",
-    "/health",
-    "/docs",
-    "/openapi.json"
-]
-
-# 2. نقطة التفتيش المركزية (Default-Deny Middleware)
-@app.middleware("http")
-async def centralized_auth_guard(request: Request, call_next):
-    path = request.url.path
-    
-    # السماح للمسارات العامة أو مسارات غير الـ API بالمرور
-    if any(path.startswith(p) for p in PUBLIC_PATHS) or not path.startswith("/api/"):
-        return await call_next(request)
-    
-    # التحقق من وجود التوكن في الـ Headers
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return JSONResponse(
-            status_code=401, 
-            content={"detail": "Unauthorized: Missing or invalid token."}
-        )
-    
-    token = auth_header.split(" ")[1]
-    
-    # التحقق من صحة التوكن عبر Supabase (Server-side validation)
-    try:
-        # إذا كنتِ تستخدمين Supabase Auth
-        user = supabase.auth.get_user(jwt=token)
-        if not user:
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized: Invalid session."})
-    except Exception as e:
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized: Session expired or invalid."})
-
-    # إذا كان التوكن صحيحاً، يتم استكمال الطلب
-    response = await call_next(request)
-    return response
 
 # ===========================================================================
 # 8. DYNAMIC SIMULATOR (Fixes 1 & 3)
