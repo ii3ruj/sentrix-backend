@@ -1224,9 +1224,16 @@ async def upload_pdf(
     }
     return result
 # ===========================================================================
-# 9. TWILIO EMAIL, SMS, WHATSAPP & VOICE CALLS
+# 9. TWILIO EMAIL, SMS & VOICE CALLS (OFFICIAL API INTEGRATION)
 # ===========================================================================
+
+import requests
+from twilio.rest import Client
+
 def notify_email(pkg: dict) -> dict:
+    """
+    إرسال إيميل تنبيه عبر Twilio Email API باستخدام الطريقة الرسمية (requests).
+    """
     global LAST_EMAIL
     risk = pkg["risk"]
     inc = pkg["incident"]
@@ -1235,104 +1242,77 @@ def notify_email(pkg: dict) -> dict:
         return {"sent": False, "reason": "severity_not_critical"}
 
     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL and ALERT_EMAILS):
-        result = {"sent": False, "reason": "missing_config", "at": now_iso()}
-        LAST_EMAIL = result
-        return result
+        return {"sent": False, "reason": "missing_config"}
 
-    rec = pkg.get("recommendation", {})
-    actions = "\n".join(f"  {i + 1}. {a['title']}" for i, a in enumerate(rec.get("actions", [])))
-
-    email_body = f"""
-    <h2>⚠️ SentriX Critical Security Alert</h2>
+    # محتوى الإيميل
+    email_html = f"""
+    <h2>⚠️ SentriX Critical Alert</h2>
     <p><strong>Incident ID:</strong> {inc['id']}</p>
     <p><strong>Title:</strong> {inc['title']}</p>
-    <p><strong>Type:</strong> {inc['incident_type']}</p>
-    <p><strong>Source:</strong> {inc['source']}</p>
-    <p><strong>Asset:</strong> {inc['asset_type']} ({inc['asset_criticality']} criticality)</p>
-    <p><strong>Risk Score:</strong> {risk['risk_score']} / 100</p>
     <p><strong>Severity:</strong> {risk['severity']}</p>
-    <hr>
-    <h3>Recommended Playbook: {rec.get('playbook', 'N/A')}</h3>
-    <pre>{actions}</pre>
-    <p>Please check the SentriX dashboard immediately for the attached PDF report and investigation details.</p>
+    <p>Please log in to the SentriX dashboard to review investigation details.</p>
     """
 
-    url = "https://comms.twilio.com/v1/Emails"
-    payload = {
-        "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
-        "to": [{"address": email} for email in ALERT_EMAILS],
-        "content": {
-            "subject": f"⚠️ [SentriX Critical Alert] {inc['incident_type']} on {inc['asset_type']} ({inc['id']})",
-            "html": email_body
-        }
-    }
-
     try:
-        import httpx
-        import base64
-        credentials = f"{TWILIO_SID}:{TWILIO_TOKEN}"
-        encoded_credentials = base64.b64encode(credentials.encode()).decode()
-        headers = {"Authorization": f"Basic {encoded_credentials}", "Content-Type": "application/json"}
-        
-        with httpx.Client(timeout=20.0) as client:
-            response = client.post(url, json=payload, headers=headers)
-            if response.status_code in (200, 201, 202):
-                result = {"sent": True, "to": ALERT_EMAILS, "at": now_iso()}
-            else:
-                result = {"sent": False, "reason": f"HTTP {response.status_code}: {response.text[:200]}", "at": now_iso()}
+        response = requests.post(
+            "https://comms.twilio.com/v1/Emails",
+            auth=(TWILIO_SID, TWILIO_TOKEN),
+            json={
+                "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
+                "to": [{"address": email} for email in ALERT_EMAILS],
+                "content": {
+                    "subject": f"⚠️ [SentriX Alert] Critical incident on {inc['asset_type']}",
+                    "html": email_html
+                }
+            }
+        )
+        if response.status_code in (200, 201, 202):
+            result = {"sent": True, "status": response.status_code}
+        else:
+            result = {"sent": False, "reason": f"HTTP {response.status_code}: {response.text[:100]}"}
     except Exception as e:
-        result = {"sent": False, "reason": str(e)[:200], "at": now_iso()}
+        result = {"sent": False, "reason": str(e)[:100]}
 
     LAST_EMAIL = result
     return result
 
 def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
+    """
+    إرسال SMS و إجراء مكالمة صوتية باستخدام مكتبة Twilio الرسمية.
+    """
     global LAST_TWILIO
     if severity != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
 
     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE):
-        return {"sent": False, "reason": "missing_config", "at": now_iso()}
+        return {"sent": False, "reason": "missing_config"}
 
-    try:
-        from twilio.rest import Client
-        client = Client(TWILIO_SID, TWILIO_TOKEN)
-    except Exception as e:
-        return {"sent": False, "reason": str(e), "at": now_iso()}
-
-    body = (f"SentriX ALERT — CRITICAL\n"
-            f"Incident: {ref}\nType: {incident_type}\n"
-            f"Risk: {risk_score}/100\nImmediate response required.")
-
-    results, any_ok = [], False
     target_phone = "+966537020435"
+    client = Client(TWILIO_SID, TWILIO_TOKEN)
+    results = []
 
-    for num in TEAM_NUMBERS:
-        # 1. SMS
-        try:
-            msg = client.messages.create(body=body, from_=TWILIO_PHONE, to=num)
-            results.append({"to": num, "type": "sms", "sid": msg.sid})
-            any_ok = True
-        except Exception as e:
-            results.append({"to": num, "type": "sms", "error": str(e)[:100]})
+    # 1. إرسال SMS
+    try:
+        msg = client.messages.create(
+            to=target_phone,
+            from_=TWILIO_PHONE,
+            body=f"SentriX Alert: Critical incident {ref} detected. Risk: {risk_score}/100."
+        )
+        results.append({"type": "sms", "sid": msg.sid})
+    except Exception as e:
+        results.append({"type": "sms", "error": str(e)[:100]})
 
-        # 2. WhatsApp
-        try:
-            wa_msg = client.messages.create(body=body, from_=f"whatsapp:{TWILIO_PHONE}", to=f"whatsapp:{num}")
-            results.append({"to": num, "type": "whatsapp", "sid": wa_msg.sid})
-            any_ok = True
-        except Exception as e:
-            results.append({"to": num, "type": "whatsapp", "error": str(e)[:100]})
+    # 2. إجراء اتصال صوتي (Voice Call) بالقالب الرسمي
+    try:
+        call = client.calls.create(
+            url="https://webhooks.twilio.com/v1/Voice/Template/voice_speech_recognition",
+            to=target_phone,
+            from_=TWILIO_PHONE
+        )
+        results.append({"type": "voice", "sid": call.sid})
+    except Exception as e:
+        results.append({"type": "voice", "error": str(e)[:100]})
 
-        # 3. Voice Call
-        try:
-            twiml = f"<Response><Say voice='alice'>Critical security incident {ref} detected. {incident_type}. Please check SentriX.</Say></Response>"
-            call = client.calls.create(twiml=twiml, from_=TWILIO_PHONE, to=target_phone)
-            results.append({"to": target_phone, "type": "voice", "sid": call.sid})
-            any_ok = True
-        except Exception as e:
-            results.append({"to": target_phone, "type": "voice", "error": str(e)[:100]})
-
-    result = {"sent": any_ok, "results": results, "at": now_iso()}
+    result = {"sent": True, "results": results}
     LAST_TWILIO = result
     return result
