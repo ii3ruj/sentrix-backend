@@ -57,7 +57,7 @@ TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
 SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "15"))   # 4 حوادث في الدقيقة
 # 0 = بلا سقف: التوليد مستمر ما دامت الخدمة تعمل
 SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "0"))
-MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "300"))
+MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "100000"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
 
 # Render يضبط RENDER_EXTERNAL_URL تلقائياً؛ يمكن تجاوزه يدوياً بـ KEEP_ALIVE_URL
@@ -425,7 +425,7 @@ def hydrate_from_supabase() -> None:
     global PACKAGES
     if not supabase or PACKAGES: return
     try:
-        res = supabase.table("incident_reports").select("report_json").order("created_at", desc=True).limit(300).execute()
+        res = supabase.table("incident_reports").select("report_json").order("created_at", desc=True).limit(100000).execute()
         rows = [r["report_json"] for r in (res.data or []) if r.get("report_json")]
         if rows:
             PACKAGES = rows
@@ -635,7 +635,8 @@ def process_incident(payload: IncidentIn) -> dict:
     }
 
     PACKAGES.insert(0, package)
-    del PACKAGES[MAX_PACKAGES:]
+    # تم إيقاف سطر القص لكي لا يتوقف أبداً ويستمر لشهور طويلة
+    # del PACKAGES[MAX_PACKAGES:]
     _write_mirror(PACKAGES)
     package["persistence"] = persist_to_supabase(package, incident_uuid, pdf_bytes)
     package["notification"] = notify_twilio(ref, risk["severity"], itype, risk["risk_score"])
