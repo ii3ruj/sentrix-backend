@@ -48,7 +48,9 @@ TEAM_NUMBERS = [n.strip() for n in os.environ.get("TEAM_NUMBERS", "").split(",")
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
-SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "45"))
+SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "180"))
+SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "60"))
+MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "200"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
 
 BASE_DIR = Path(__file__).parent
@@ -140,10 +142,25 @@ async def centralized_auth_guard(request: Request, call_next):
 
     # 2. التحقق من وجود التوكن
     auth_header = request.headers.get("Authorization")
+
+    # تنزيل الـPDF يتم بفتح رابط مباشر في تبويب جديد، والمتصفح لا يرسل
+    # هيدر Authorization في هذه الحالة — ولهذا كان يظهر
+    # "Unauthorized: Missing or invalid token".
+    # لذلك يُقبل التوكن أيضاً كمعامل استعلام لمسارات التنزيل وحدها.
+    if not auth_header and path.endswith("/download"):
+        query_token = request.query_params.get("token")
+        if query_token:
+            return await _authorize(request, call_next, query_token.strip())
+
     if not auth_header or not auth_header.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "Unauthorized: Missing or invalid token."})
 
     token = auth_header.split(" ", 1)[1].strip()
+
+    return await _authorize(request, call_next, token)
+
+
+async def _authorize(request, call_next, token: str):
 
     # 3أ. توكن SentriX المحلي
     if verify_local_token(token):
@@ -271,6 +288,7 @@ def _write_crsi_archives(rows: list) -> None:
 CRSI_ARCHIVES: list = _read_crsi_archives()
 
 SUPABASE_ERRORS: list = []
+LAST_TWILIO: dict = {"sent": None, "reason": "no critical incident yet"}
 
 
 def sb_insert(table: str, row: dict) -> bool:
@@ -326,6 +344,30 @@ class IncidentIn(BaseModel):
     business_impact: str = "medium"
     source_file_name: str | None = None
     flow_features: dict | None = None
+
+_FEATURE_LOOKUP = {"".join(k.lower().split()): k for k in FEATURE_KEYS}
+
+
+def _match_feature(cell) -> str | None:
+    """مطابقة اسم الخاصية بغض النظر عن المسافات وحالة الأحرف."""
+    if cell is None:
+        return None
+    return _FEATURE_LOOKUP.get("".join(str(cell).lower().split()))
+
+
+def _to_number(cell) -> float | None:
+    """تحويل آمن يتجاهل الفواصل والوحدات والرموز."""
+    if cell is None:
+        return None
+    cleaned = str(cell).replace(",", "").replace("%", "").strip()
+    cleaned = re.sub(r"[^0-9eE\.\+\-]", "", cleaned)
+    if cleaned in ("", "-", "+", ".", "e", "E"):
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
 
 def features_complete(features: dict | None) -> bool:
     if not features: return False
@@ -440,6 +482,7 @@ def process_incident(payload: IncidentIn) -> dict:
     }
 
     PACKAGES.insert(0, package)
+    del PACKAGES[MAX_PACKAGES:]          # حد أعلى للذاكرة والملف المحلي
     _write_mirror(PACKAGES)
     package["persistence"] = persist_to_supabase(package, incident_uuid, pdf_bytes)
     package["notification"] = notify_twilio(ref, risk["severity"], itype, risk["risk_score"])
@@ -903,6 +946,12 @@ async def debug_config():
         "simulator_enabled": SIM_ENABLED,
         "simulator_interval_seconds": SIM_INTERVAL,
         "last_supabase_errors": SUPABASE_ERRORS[-5:],
+        "twilio": {
+            "configured": bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE),
+            "recipients": len(TEAM_NUMBERS),
+            "last_result": LAST_TWILIO,
+        },
+        "simulator_max_incidents": SIM_MAX_INCIDENTS,
         "status": "Ready",
     }
 
@@ -910,13 +959,22 @@ async def debug_config():
 # 8. DYNAMIC SIMULATOR
 # ===========================================================================
 def synth_features(hot: bool) -> dict:
+    """
+    النموذج مُدرَّب على بيانات مرّت على StandardScaler (متوسط 0، انحراف 1).
+    الفيتشرز الخام السابقة (آلاف وملايين) كانت خارج التوزيع تماماً، فيصنّفها
+    Isolation Forest شذوذاً شديداً في كل مرة — ولهذا كانت أغلب الحوادث Critical.
+    الآن تُولَّد بنفس مقياس التدريب: طبيعية قرب الصفر، وهجومية بانحراف واضح.
+    """
     out = {}
+    # الهجوم ينحرف في مجموعة من الخصائص فقط، لا في كلها
+    deviating = set(random.sample(FEATURE_KEYS, k=min(12, len(FEATURE_KEYS)))) if hot else set()
+    magnitude = random.uniform(2.5, 4.5) if hot else 0.0
+
     for f in FEATURE_KEYS:
-        if f == "Protocol": out[f] = random.choice([6, 17, 1])
-        elif "Flag Count" in f: out[f] = random.randint(1, 3) if hot else random.randint(0, 1)
-        elif f in ("Flow Bytes/s", "Flow Packets/s"): out[f] = round(random.uniform(6000, 10000) if hot else random.uniform(200, 2500), 2)
-        elif f == "Flow Duration": out[f] = round(random.uniform(1200000, 2000000) if hot else random.uniform(50000, 600000), 2)
-        else: out[f] = round(random.uniform(0, 1500), 2)
+        value = random.gauss(0, 1)
+        if f in deviating:
+            value += magnitude * random.choice([1, -1])
+        out[f] = round(max(min(value, 8.0), -8.0), 4)
     return out
 
 def build_sim_incident() -> IncidentIn:
@@ -955,9 +1013,15 @@ def build_sim_incident() -> IncidentIn:
 async def simulator_loop():
     while True:
         await asyncio.sleep(SIM_INTERVAL)
-        if SIM_ENABLED:
-            try: process_incident(build_sim_incident())
-            except Exception as e: print(f"[simulator] error: {e}")
+        if not SIM_ENABLED:
+            continue
+        # سقف واضح: التوليد المستمر بلا حد كان يُغرق الواجهة والمشرف
+        if len(PACKAGES) >= SIM_MAX_INCIDENTS:
+            continue
+        try:
+            process_incident(build_sim_incident())
+        except Exception as e:
+            print(f"[simulator] error: {e}")
 
 @app.on_event("startup")
 async def startup_event():
@@ -989,12 +1053,35 @@ async def upload_pdf(
         try:
             with pdfplumber.open(tmp) as pdf:
                 text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+
+                # المطابقة الحرفية السابقة كانت تفشل مع اختلاف المسافات أو
+                # حالة الأحرف، والتحويل يفشل مع الفواصل والوحدات — فتخرج
+                # قائمة ناقصة فيسقط الملف إلى context_only ولا يُستدعى النموذج.
                 for page in pdf.pages:
-                    for tbl in page.extract_tables():
+                    for tbl in (page.extract_tables() or []):
                         for row in tbl:
-                            if row and len(row) >= 2 and row[0] and str(row[0]).strip() in FEATURE_KEYS:
-                                try: extracted[str(row[0]).strip()] = float(str(row[1]).strip())
-                                except: pass
+                            if not row or len(row) < 2:
+                                continue
+                            for i, cell in enumerate(row[:-1]):
+                                key = _match_feature(cell)
+                                if not key or key in extracted:
+                                    continue
+                                for candidate in row[i + 1:]:
+                                    value = _to_number(candidate)
+                                    if value is not None:
+                                        extracted[key] = value
+                                        break
+
+                # صيغة "Feature: value" داخل النص لمن لا يضع جدولاً
+                for line in text.splitlines():
+                    if ":" not in line:
+                        continue
+                    left, _, right = line.partition(":")
+                    key = _match_feature(left)
+                    if key and key not in extracted:
+                        value = _to_number(right)
+                        if value is not None:
+                            extracted[key] = value
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -1068,10 +1155,16 @@ async def upload_pdf(
     )
 
     result = process_incident(payload)
+    missing = [k for k in FEATURE_KEYS if k not in extracted]
     result["pdf_extraction"] = {
         "matched_features": len(extracted),
         "required_features": len(FEATURE_KEYS),
+        "missing_features": missing[:10],
         "used_for_model": complete,
+        "reason": None if complete else (
+            f"{len(missing)} network flow feature(s) missing from the report — "
+            f"scored from organizational context only."
+        ),
         "detected_incident_type": itype,
         "uploaded_sha256": sha256_of(data),
         "client_sha256": sha256,
@@ -1083,20 +1176,57 @@ async def upload_pdf(
 # 9. TWILIO
 # ===========================================================================
 def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
+    """
+    كان سبب الفشل يُطبع بسطر واحد بلا تفاصيل، فيصعب معرفة لماذا لا تصل الرسالة.
+    الأسباب الشائعة على الحساب التجريبي:
+      21608  رقم المستقبِل غير موثّق  → Twilio Console ▸ Verified Caller IDs
+      21408  الإرسال إلى المنطقة معطّل → Messaging ▸ Geo Permissions ▸ Saudi Arabia
+      21606  رقم المُرسِل لا يدعم SMS
+    """
+    global LAST_TWILIO
     if severity != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
-    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE and TEAM_NUMBERS):
-        return {"sent": False, "reason": "missing_config"}
+
+    missing = [n for n, v in (("TWILIO_SID", TWILIO_SID), ("TWILIO_TOKEN", TWILIO_TOKEN),
+                              ("TWILIO_PHONE", TWILIO_PHONE), ("TEAM_NUMBERS", TEAM_NUMBERS)) if not v]
+    if missing:
+        result = {"sent": False, "reason": f"missing_config: {', '.join(missing)}", "at": now_iso()}
+        print(f"[twilio] skipped — {result['reason']}")
+        LAST_TWILIO = result
+        return result
 
     try:
         from twilio.rest import Client
-        client = Client(TWILIO_SID, TWILIO_TOKEN)
-        body = f"SentriX ALERT: Critical {incident_type} incident {ref}. Risk {risk_score}/100. Immediate response required."
-        sent = []
-        for num in TEAM_NUMBERS:
-            msg = client.messages.create(body=body, from_=TWILIO_PHONE, to=num)
-            sent.append({"to": num, "sid": msg.sid})
-        return {"sent": True, "messages": sent}
     except Exception as e:
-        print(f"[twilio] FAILED: {e}")
-        return {"sent": False, "reason": str(e)}
+        result = {"sent": False, "reason": f"twilio library not installed: {e}", "at": now_iso()}
+        print(f"[twilio] {result['reason']}")
+        LAST_TWILIO = result
+        return result
+
+    body = (f"SentriX ALERT — CRITICAL\n"
+            f"Incident: {ref}\nType: {incident_type}\n"
+            f"Risk: {risk_score}/100\nImmediate response required.")
+
+    results, any_ok = [], False
+    try:
+        client = Client(TWILIO_SID, TWILIO_TOKEN)
+    except Exception as e:
+        result = {"sent": False, "reason": f"client init failed: {str(e)[:200]}", "at": now_iso()}
+        print(f"[twilio] {result['reason']}")
+        LAST_TWILIO = result
+        return result
+
+    for num in TEAM_NUMBERS:
+        try:
+            msg = client.messages.create(body=body, from_=TWILIO_PHONE, to=num)
+            print(f"[twilio] queued sid={msg.sid} to={num} status={msg.status}")
+            results.append({"to": num, "sid": msg.sid, "status": msg.status})
+            any_ok = True
+        except Exception as e:
+            code = getattr(e, "code", None)
+            print(f"[twilio] FAILED to={num} code={code}: {e}")
+            results.append({"to": num, "error": str(e)[:250], "code": code})
+
+    result = {"sent": any_ok, "results": results, "at": now_iso()}
+    LAST_TWILIO = result
+    return result
