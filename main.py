@@ -1223,9 +1223,8 @@ async def upload_pdf(
         "analyst": analyst,
     }
     return result
-
 # ===========================================================================
-# 9. TWILIO EMAIL & SMS
+# 9. TWILIO EMAIL, SMS, WHATSAPP & VOICE CALLS
 # ===========================================================================
 def notify_email(pkg: dict) -> dict:
     """
@@ -1332,14 +1331,40 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         LAST_TWILIO = result
         return result
 
+    # الرقم المعتمد للتنبيهات بصيغة دولية صحيحة
+    target_phone = "+966537020435"
+
     for num in TEAM_NUMBERS:
+        # 1. إرسال SMS التقليدي
         try:
             msg = client.messages.create(body=body, from_=TWILIO_PHONE, to=num)
-            results.append({"to": num, "sid": msg.sid, "status": msg.status})
+            results.append({"to": num, "type": "sms", "sid": msg.sid, "status": msg.status})
             any_ok = True
         except Exception as e:
-            code = getattr(e, "code", None)
-            results.append({"to": num, "error": str(e)[:250], "code": code})
+            results.append({"to": num, "type": "sms", "error": str(e)[:250]})
+
+        # 2. إرسال WhatsApp (عبر بادئة whatsapp:)
+        try:
+            wa_from = f"whatsapp:{TWILIO_PHONE}"
+            wa_to = f"whatsapp:{num}"
+            wa_msg = client.messages.create(body=body, from_=wa_from, to=wa_to)
+            results.append({"to": num, "type": "whatsapp", "sid": wa_msg.sid, "status": wa_msg.status})
+            any_ok = True
+        except Exception as e:
+            results.append({"to": num, "type": "whatsapp", "error": str(e)[:250]})
+
+        # 3. إجراء اتصال صوتي تلقائي (Voice Call) يقرأ التحذير
+        try:
+            twiml_response = f"<Response><Say voice='alice'>Attention SOC Analyst. A critical security incident {ref} of type {incident_type} has been detected with a risk score of {risk_score}. Please check SentriX platform immediately.</Say></Response>"
+            call = client.calls.create(
+                twiml=twiml_response,
+                from_=TWILIO_PHONE,
+                to=target_phone
+            )
+            results.append({"to": target_phone, "type": "voice_call", "sid": call.sid, "status": call.status})
+            any_ok = True
+        except Exception as e:
+            results.append({"to": target_phone, "type": "voice_call", "error": str(e)[:250]})
 
     result = {"sent": any_ok, "results": results, "at": now_iso()}
     LAST_TWILIO = result
