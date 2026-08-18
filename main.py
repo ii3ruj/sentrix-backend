@@ -49,8 +49,6 @@ TEAM_NUMBERS = [n.strip() for n in os.environ.get("TEAM_NUMBERS", "").split(",")
 # إعدادات Twilio Email API الجديدة
 TWILIO_FROM_EMAIL = os.environ.get("TWILIO_FROM_EMAIL")
 ALERT_EMAILS = [e.strip() for e in os.environ.get("ALERT_EMAILS", "ruba35uj@gmail.com").split(",") if e.strip()]
-ARCHIVE_STORAGE_BUCKET = os.environ.get("ARCHIVE_STORAGE_BUCKET", "archives")
-ARCHIVE_STORAGE_BUCKET = os.environ.get("ARCHIVE_STORAGE_BUCKET", "archives")
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
@@ -65,7 +63,7 @@ DB_DIR = BASE_DIR / "storage" / "db"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SentriX AI Engine", version="10.1.0")
+app = FastAPI(title="SentriX AI Engine", version="10.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -81,6 +79,8 @@ PUBLIC_PATHS = [
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/forgot-password",
+    "/api/debug/config",
+    "/api/admin/clear",
     "/health",
     "/docs",
     "/openapi.json"
@@ -110,9 +110,9 @@ def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def issue_token(email: str, role: str | None = None) -> str:
+def issue_token(email: str) -> str:
     payload = json.dumps(
-        {"email": email, "role": role, "exp": int(datetime.now(timezone.utc).timestamp()) + TOKEN_TTL_HOURS * 3600},
+        {"email": email, "exp": int(datetime.now(timezone.utc).timestamp()) + TOKEN_TTL_HOURS * 3600},
         separators=(",", ":"),
     ).encode()
     body = _b64e(payload)
@@ -162,26 +162,13 @@ async def centralized_auth_guard(request: Request, call_next):
 
 
 async def _authorize(request, call_next, token: str):
-    local_user = verify_local_token(token)
-    if local_user:
-        request.state.auth_user = local_user
+    if verify_local_token(token):
         return await call_next(request)
 
     try:
         if supabase:
             user = supabase.auth.get_user(jwt=token)
             if user:
-                supa_user = getattr(user, "user", user)
-                email = str(getattr(supa_user, "email", "") or "").strip().lower()
-                role = None
-                if email:
-                    try:
-                        role_res = supabase.table("users").select("role").eq("email", email).limit(1).execute()
-                        role_row = (role_res.data or [None])[0]
-                        role = role_row.get("role") if role_row else None
-                    except Exception:
-                        role = None
-                request.state.auth_user = {"email": email, "role": role, "auth_source": "supabase_auth"}
                 return await call_next(request)
     except Exception:
         pass
@@ -349,29 +336,6 @@ def now_iso() -> str: return datetime.now(timezone.utc).isoformat()
 def sha256_of(data: bytes) -> str: return hashlib.sha256(data).hexdigest()
 def canonical_json(obj) -> bytes: return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
 
-
-def build_archive_snapshot(package: dict) -> dict:
-    return {k: v for k, v in package.items() if k not in ("archive", "notification", "persistence", "email_notification")}
-
-
-def upload_pdf_to_supabase(pdf_bytes: bytes, incident_id: str) -> dict:
-    if not supabase:
-        return {"uploaded": False, "reason": "supabase client not configured", "storage_path": None}
-    storage_path = f"incident-reports/{incident_id}.pdf"
-    try:
-        bucket = supabase.storage.from_(ARCHIVE_STORAGE_BUCKET)
-        try:
-            bucket.upload(storage_path, pdf_bytes, {"content-type": "application/pdf", "upsert": "false"})
-        except Exception:
-            # Some supabase-py versions expect boolean upsert metadata.
-            bucket.upload(storage_path, pdf_bytes, {"content-type": "application/pdf", "upsert": False})
-        return {"uploaded": True, "storage_path": storage_path, "bucket": ARCHIVE_STORAGE_BUCKET}
-    except Exception as e:
-        msg = str(e)[:400]
-        SUPABASE_ERRORS.append({"table": "storage", "error": msg, "at": now_iso()})
-        del SUPABASE_ERRORS[:-20]
-        return {"uploaded": False, "reason": msg, "storage_path": None}
-
 class IncidentIn(BaseModel):
     title: str | None = None
     incident_type: str = "malware"
@@ -505,18 +469,16 @@ def process_incident(payload: IncidentIn) -> dict:
 
     package = {"incident": incident_row, "ai_result": ai_data, "risk": risk, "threat": threat, "recommendation": rec, "key_findings": findings}
     package["crsi"] = compute_crsi(PACKAGES + [package])
-    package["report"] = {"report_id": f"RPT-{ref.replace('INC-', '')}", "generated_at": created_at, "report_version": "10.1"}
+    package["report"] = {"report_id": f"RPT-{ref.replace('INC-', '')}", "generated_at": created_at, "report_version": "10.0"}
 
     pdf_bytes = render_pdf(package)
     (FILES_DIR / f"{ref}.pdf").write_bytes(pdf_bytes)
 
-    snapshot = build_archive_snapshot(package)
-    storage_result = upload_pdf_to_supabase(pdf_bytes, ref)
+    snapshot = {k: v for k, v in package.items()}
     package["archive"] = {
         "archive_id": str(uuid.uuid4()), "report_id": package["report"]["report_id"], "incident_id": ref, "title": f"Incident Report - {ref}", "type": "Incident Report",
         "archived_at": created_at.replace("T", " ")[:16], "sha256": sha256_of(canonical_json(snapshot)), "pdf_sha256": sha256_of(pdf_bytes), "archived_by": "SentriX Engine",
         "retention_until": (date.today() + timedelta(days=365 * 7)).isoformat(), "storage_type": "WORM (Immutable)", "pdf_path": f"/api/archive/{ref}/download",
-        "storage_path": storage_result.get("storage_path"), "storage_bucket": storage_result.get("bucket"),
     }
 
     PACKAGES.insert(0, package)
@@ -577,7 +539,7 @@ def persist_to_supabase(pkg: dict, incident_uuid: str, pdf_bytes: bytes) -> dict
         "intel_version": "1.0",
     })
     report_uuid = str(uuid.uuid4())
-    status["incident_reports"] = sb_insert("incident_reports", {"id": report_uuid, "incident_id": incident_uuid, "report_json": pkg, "pdf_path": pkg["archive"]["pdf_path"], "report_version": "10.1"})
+    status["incident_reports"] = sb_insert("incident_reports", {"id": report_uuid, "incident_id": incident_uuid, "report_json": pkg, "pdf_path": pkg["archive"]["pdf_path"], "report_version": "10.0"})
     status["archives"] = sb_insert("archives", {"id": pkg["archive"]["archive_id"], "report_id": report_uuid, "report_snapshot": pkg, "pdf_path": pkg["archive"]["pdf_path"], "archive_period": datetime.now(timezone.utc).strftime("%Y-%m"), "sha256_hash": pkg["archive"]["sha256"]})
     return {"stored": all(status.values()), "tables": status}
 
@@ -713,7 +675,7 @@ async def get_incident(incident_id: str):
         "model_used": p["ai_result"]["model_name"], "dynamic_threshold": p["ai_result"]["dynamic_threshold"], "mitre_tactics": ", ".join(p["threat"]["mitre_tactics"]) or "N/A",
         "attack_technique": ", ".join(p["threat"]["mitre_techniques"]) or "N/A", "cia_impact": p["threat"]["cia_impact"], "key_findings": p["key_findings"],
         "playbook": p["recommendation"]["playbook"], "recommended_actions": p["recommendation"]["actions"], "crsi": p["crsi"], "report": p["report"], "archive": p["archive"],
-        "pdf_url": p["archive"]["pdf_path"], "hasAiResult": p["ai_result"]["anomaly_score"] is not None,
+        "pdf_url": p["archive"]["pdf_path"], "hasAiResult": True,
     }
 
 @app.get("/api/ai-analysis/{incident_id}")
@@ -797,7 +759,7 @@ async def list_archive():
 async def verify_archive(incident_id: str):
     p = find_package(incident_id)
     if not p: raise HTTPException(404, f"Archive record for {incident_id} not found")
-    snapshot = build_archive_snapshot(p)
+    snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification", "persistence", "email_notification")}
     current = sha256_of(canonical_json(snapshot))
     stored = p["archive"]["sha256"]
     return {
@@ -907,7 +869,7 @@ async def api_login(credentials: dict = Body(...)):
                 given = hashlib.sha256(password.encode()).hexdigest()
                 if stored and hmac.compare_digest(stored, given):
                     return {
-                        "token": issue_token(email, row.get("role")),
+                        "token": issue_token(email),
                         "user": {"email": email, "name": row.get("name"), "role": row.get("role")},
                         "auth_source": "users_table",
                     }
@@ -922,7 +884,7 @@ async def api_login(credentials: dict = Body(...)):
                 detail="Your account is not activated yet. Please contact your administrator.",
             )
         return {
-            "token": issue_token(email, account["role"]),
+            "token": issue_token(email),
             "user": {"email": email, "name": account["name"], "role": account["role"]},
             "auth_source": "builtin",
         }
@@ -930,10 +892,7 @@ async def api_login(credentials: dict = Body(...)):
     raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
 @app.get("/api/admin/clear")
-async def clear_database(request: Request, key: str = Query(None)):
-    auth_user = getattr(request.state, "auth_user", {})
-    if auth_user.get("role") != "admin":
-        return JSONResponse(status_code=403, content={"detail": "Forbidden: Admin role required."})
+async def clear_database(key: str = Query(None)):
     if key != "SentriX-Queen-Clear":
         return JSONResponse(status_code=403, content={"detail": "Forbidden: You are not the admin!"})
         
@@ -949,7 +908,7 @@ async def clear_database(request: Request, key: str = Query(None)):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "10.1.0", "incidents": len(PACKAGES)}
+    return {"status": "ok", "version": "10.0.0", "incidents": len(PACKAGES)}
 
 @app.get("/api/debug/config")
 async def debug_config():
@@ -1279,232 +1238,196 @@ def notify_email(pkg: dict) -> dict:
     risk = pkg["risk"]
     inc = pkg["incident"]
 
-    # Email only for Critical incidents
-    if str(risk.get("severity", "")).lower() != "critical":
-        result = {
+    # Send email only for Critical incidents
+    if risk["severity"] != "Critical":
+        return {
             "sent": False,
-            "reason": "severity_not_critical",
-            "incident_id": inc.get("id"),
+            "reason": "severity_not_critical"
         }
-        LAST_EMAIL = result
-        return result
 
-    # ---------------------------------------------------------
-    # Validate Twilio Email configuration
-    # ---------------------------------------------------------
-    if not TWILIO_SID:
-        result = {
-            "sent": False,
-            "reason": "missing_TWILIO_SID",
-        }
-        LAST_EMAIL = result
-        return result
-
-    if not TWILIO_TOKEN:
-        result = {
-            "sent": False,
-            "reason": "missing_TWILIO_TOKEN",
-        }
-        LAST_EMAIL = result
-        return result
-
-    if not TWILIO_FROM_EMAIL:
-        result = {
-            "sent": False,
-            "reason": "missing_TWILIO_FROM_EMAIL",
-        }
-        LAST_EMAIL = result
-        return result
-
-    if not ALERT_EMAILS:
-        result = {
-            "sent": False,
-            "reason": "missing_ALERT_EMAILS",
-        }
-        LAST_EMAIL = result
-        return result
-
-    # ---------------------------------------------------------
-    # Build recipients from environment variable
-    # ---------------------------------------------------------
-    recipients = [
-        {"address": email}
-        for email in ALERT_EMAILS
-        if email
-    ]
-
-    if not recipients:
-        result = {
-            "sent": False,
-            "reason": "no_valid_email_recipients",
-        }
-        LAST_EMAIL = result
-        return result
-
-    # ---------------------------------------------------------
-    # Correct risk score key
-    # ---------------------------------------------------------
-    risk_score = risk.get("risk_score", "N/A")
-
-    subject = f"🚨 SentriX Critical Incident Alert — {inc['id']}"
-
-    html_body = f"""
-    <!DOCTYPE html>
-    <html>
-    <body style="font-family: Arial, sans-serif;">
-
-        <h2>🚨 SentriX Security Alert</h2>
-
-        <p>
-            <strong>Critical cybersecurity incident detected.</strong>
-        </p>
-
-        <hr>
-
-        <p>
-            <strong>Incident ID:</strong>
-            {inc.get('id', 'N/A')}
-        </p>
-
-        <p>
-            <strong>Title:</strong>
-            {inc.get('title', 'N/A')}
-        </p>
-
-        <p>
-            <strong>Incident Type:</strong>
-            {inc.get('incident_type', 'N/A')}
-        </p>
-
-        <p>
-            <strong>Severity:</strong>
-            {risk.get('severity', 'Critical')}
-        </p>
-
-        <p>
-            <strong>Risk Score:</strong>
-            {risk_score} / 100
-        </p>
-
-        <p>
-            <strong>Priority:</strong>
-            {risk.get('priority', 'N/A')}
-        </p>
-
-        <p>
-            <strong>Detected At:</strong>
-            {inc.get('created_at', 'N/A')}
-        </p>
-
-        <hr>
-
-        <p>
-            Immediate attention is required.
-        </p>
-
-        <p>
-            <strong>SentriX Security Platform</strong>
-        </p>
-
-    </body>
-    </html>
-    """
-
-    text_body = f"""
-SentriX Security Alert
-
-Critical cybersecurity incident detected.
-
-Incident ID: {inc.get('id', 'N/A')}
-Title: {inc.get('title', 'N/A')}
-Incident Type: {inc.get('incident_type', 'N/A')}
-Severity: {risk.get('severity', 'Critical')}
-Risk Score: {risk_score} / 100
-Priority: {risk.get('priority', 'N/A')}
-Detected At: {inc.get('created_at', 'N/A')}
-
-Immediate attention is required.
-
-SentriX Security Platform
-"""
-
-    payload = {
-        "from": {
-            "address": TWILIO_FROM_EMAIL,
-            "name": "SentriX Security"
-        },
-        "to": recipients,
-        "content": {
-            "subject": subject,
-            "html": html_body,
-            "text": text_body
-        }
-    }
-
-    # ---------------------------------------------------------
-    # Send through Twilio Email API
-    # ---------------------------------------------------------
     try:
         response = requests.post(
             "https://comms.twilio.com/v1/Emails",
             auth=(TWILIO_SID, TWILIO_TOKEN),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
+            json={
+                "from": {
+                    "address": TWILIO_FROM_EMAIL,
+                    "name": "SentriX Security"
+                },
+                "to": [
+                    {
+                        "address": "ruba35uj@gmail.com"
+                    }
+                ],
+                "content": {
+                    "subject": f"Critical Incident: {inc['id']}",
+                    "html": f"""
+                        <html>
+                            <body>
+                                <h2>SentriX Security Alert</h2>
+
+                                <p>
+                                    <b>Critical incident detected.</b>
+                                </p>
+
+                                <p>
+                                    <b>Incident ID:</b> {inc['id']}
+                                </p>
+
+                                <p>
+                                    <b>Title:</b> {inc['title']}
+                                </p>
+
+                                <p>
+                                    <b>Severity:</b> {risk['severity']}
+                                </p>
+
+                                <p>
+                                    <b>Risk Score:</b> {risk.get('score', 'N/A')}
+                                </p>
+
+                                <p>
+                                    Immediate attention is required.
+                                </p>
+
+                                <br>
+
+                                <p>
+                                    <b>SentriX Security Platform</b>
+                                </p>
+                            </body>
+                        </html>
+                    """
+                }
             },
-            json=payload,
-            timeout=30,
+            timeout=30
         )
 
-        # Twilio Email API uses 202 Accepted for successful submission
-        if response.status_code == 202:
-            try:
-                response_data = response.json()
-            except Exception:
-                response_data = {}
-
-            result = {
-                "sent": True,
-                "accepted": True,
-                "status": response.status_code,
-                "operation_id": response_data.get("operationId"),
-                "operation_location": response_data.get("operationLocation"),
-                "recipients": ALERT_EMAILS,
-            }
-
-        else:
-            try:
-                error_data = response.json()
-            except Exception:
-                error_data = response.text[:1000]
-
-            result = {
-                "sent": False,
-                "accepted": False,
-                "status": response.status_code,
-                "error": error_data,
-                "recipients": ALERT_EMAILS,
-            }
-
-    except requests.exceptions.Timeout:
         result = {
-            "sent": False,
-            "reason": "twilio_email_timeout",
+            "sent": response.status_code in (200, 201, 202),
+            "status": response.status_code
         }
 
-    except requests.exceptions.RequestException as e:
-        result = {
-            "sent": False,
-            "reason": "twilio_email_request_error",
-            "error": str(e)[:500],
-        }
+        # Include Twilio response if request failed
+        if not result["sent"]:
+            try:
+                result["error"] = response.json()
+            except Exception:
+                result["error"] = response.text[:300]
 
     except Exception as e:
         result = {
             "sent": False,
-            "reason": "unexpected_email_error",
-            "error": str(e)[:500],
+            "error": str(e)[:300]
         }
 
     LAST_EMAIL = result
+    return result
+
+
+def notify_twilio(
+    ref: str,
+    severity: str,
+    incident_type: str,
+    risk_score: int
+) -> dict:
+
+    global LAST_TWILIO
+
+    # Send SMS + Voice only for Critical incidents
+    if severity != "Critical":
+        return {
+            "sent": False,
+            "reason": "severity_not_critical"
+        }
+
+    client = Client(TWILIO_SID, TWILIO_TOKEN)
+
+    target_phone = "+966537020435"
+
+    results = []
+
+    # -----------------------------------------------------------------------
+    # 1. SMS ALERT
+    # -----------------------------------------------------------------------
+
+    try:
+        sms_message = (
+            f"SentriX Security Alert: "
+            f"Critical {incident_type} incident detected. "
+            f"Incident ID: {ref}. "
+            f"Risk Score: {risk_score}. "
+            f"Login required."
+        )
+
+        message = client.messages.create(
+            to=target_phone,
+            from_=TWILIO_PHONE,
+            body=sms_message
+        )
+
+        results.append({
+            "type": "sms",
+            "sent": True,
+            "sid": message.sid
+        })
+
+    except Exception as e:
+        results.append({
+            "type": "sms",
+            "sent": False,
+            "error": str(e)[:300]
+        })
+
+    # -----------------------------------------------------------------------
+    # 2. VOICE CALL ALERT
+    # -----------------------------------------------------------------------
+
+    try:
+        # Create dynamic TwiML for the voice call
+        voice_message = (
+            f"SentriX Security Alert. "
+            f"A critical {incident_type} incident has been detected. "
+            f"Incident ID {ref}. "
+            f"Risk score {risk_score}. "
+            f"Immediate attention is required."
+        )
+
+        response = VoiceResponse()
+
+        response.say(
+            voice_message,
+            language="en-US"
+        )
+
+        call = client.calls.create(
+            twiml=str(response),
+            to=target_phone,
+            from_=TWILIO_PHONE
+        )
+
+        results.append({
+            "type": "voice",
+            "sent": True,
+            "sid": call.sid
+        })
+
+    except Exception as e:
+        results.append({
+            "type": "voice",
+            "sent": False,
+            "error": str(e)[:300]
+        })
+
+    # -----------------------------------------------------------------------
+    # FINAL RESULT
+    # -----------------------------------------------------------------------
+
+    result = {
+        "sent": any(item.get("sent") is True for item in results),
+        "results": results
+    }
+
+    LAST_TWILIO = result
+
     return result
