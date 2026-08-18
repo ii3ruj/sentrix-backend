@@ -54,9 +54,10 @@ ARCHIVE_STORAGE_BUCKET = os.environ.get("ARCHIVE_STORAGE_BUCKET", "archives")
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
-SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "10"))
-SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "30"))
-MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "40"))
+SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "15"))   # 4 حوادث في الدقيقة
+# 0 = بلا سقف: التوليد مستمر ما دامت الخدمة تعمل
+SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "0"))
+MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "300"))
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")]
 
 # Render يضبط RENDER_EXTERNAL_URL تلقائياً؛ يمكن تجاوزه يدوياً بـ KEEP_ALIVE_URL
@@ -850,28 +851,50 @@ async def recommendations(incident_id: str | None = None):
 
 @app.get("/api/crsi-assessment")
 async def crsi_assessment():
-    crsi = compute_crsi(PACKAGES)
-    daily_history = []
+    """
+    تقييم **يومي**: درجة كل يوم تُحسب من حوادث ذلك اليوم وحده.
+    الحساب السابق كان تراكمياً (كل الحوادث حتى نهاية اليوم)، فتنزل الدرجة
+    باستمرار ولا تعكس أداء اليوم نفسه.
+    التقييم التراكمي للمؤسسة يبقى في صفحة التوصيات (/api/crsi-recommendations).
+    """
     today = datetime.now(timezone.utc).date()
 
     def pkg_day(pkg):
         try:
-            return datetime.fromisoformat(str(pkg["incident"]["created_at"]).replace("Z", "+00:00")).date()
+            return datetime.fromisoformat(
+                str(pkg["incident"]["created_at"]).replace("Z", "+00:00")
+            ).date()
         except Exception:
             return None
 
+    daily_history = []
     for i in range(5):
         day = today - timedelta(days=i)
-        upto = [p for p in PACKAGES if pkg_day(p) is not None and pkg_day(p) <= day]
-        day_score = compute_crsi(upto)["score"] if upto else 100.0
+        of_day = [p for p in PACKAGES if pkg_day(p) == day]
+        day_crsi = compute_crsi(of_day)
+        score = day_crsi["score"] if of_day else 100.0
+
         daily_history.append({
             "date": day.strftime("%b %d, %Y"),
-            "score": day_score,
-            "status": "Good" if day_score >= 70 else "Fair" if day_score >= 40 else "Poor",
-            "incident_count": len(upto[:CRSI_WINDOW]),
+            "score": score,
+            "status": "Good" if score >= 70 else "Fair" if score >= 40 else "Poor",
+            "maturity_level": day_crsi["maturity_level"] if of_day else "Strong",
+            "incident_count": len(of_day),
+            # تفصيل مجالات اليوم نفسه ليعرضه الفرونت عند اختيار اليوم
+            "breakdown": day_crsi["breakdown"] if of_day else compute_crsi([])["breakdown"],
         })
 
-    return {"score": crsi["score"], "maturity_level": crsi["maturity_level"], "breakdown": crsi["breakdown"], "dailyScores": daily_history, "incident_count": crsi["incident_count"]}
+    latest = daily_history[0]
+    return {
+        "scope": "daily",
+        "score": latest["score"],
+        "maturity_level": latest["maturity_level"],
+        "breakdown": latest["breakdown"],
+        "incident_count": latest["incident_count"],
+        "dailyScores": daily_history,
+        # للمقارنة فقط — الدرجة التراكمية المعروضة في صفحة التوصيات
+        "organizational_score": compute_crsi(PACKAGES)["score"],
+    }
 
 @app.get("/api/crsi-recommendations")
 async def crsi_recommendations():
@@ -934,12 +957,16 @@ async def crsi_recommendations():
         pb_name = "ORGANIZATIONAL_SECURITY_PLAN"
 
     return {
+        # هذه الصفحة تراكمية: كل حوادث نافذة التقييم، لا يوم واحد
+        "scope": "organizational",
+        "assessment_window": CRSI_WINDOW,
         "score": crsi["score"],
         "maturity_level": crsi["maturity_level"],
         "breakdown": crsi["breakdown"],
         "playbook": pb_name,
         "weak_domains": weak,
         "frameworks": ["NCA ECC-1:2018", "ISO/IEC 27001:2022", "NIST CSF 2.0"],
+        "incident_count": crsi["incident_count"],
         "actions": actions,
     }
 
@@ -1189,7 +1216,8 @@ async def simulator_loop():
         await asyncio.sleep(SIM_INTERVAL)
         if not SIM_ENABLED:
             continue
-        if len(PACKAGES) >= SIM_MAX_INCIDENTS:
+        # السقف اختياري الآن؛ 0 يعني توليداً مستمراً بلا توقف
+        if SIM_MAX_INCIDENTS and len(PACKAGES) >= SIM_MAX_INCIDENTS:
             continue
         try:
             process_incident(build_sim_incident())
