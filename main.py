@@ -1224,7 +1224,7 @@ async def upload_pdf(
     }
     return result
 # ===========================================================================
-# 9. TWILIO EMAIL, SMS & VOICE CALLS (SENTRIX CUSTOM INTEGRATION)
+# 9. TWILIO EMAIL, SMS & VOICE CALLS (OFFICIAL DOCUMENTATION FORMAT)
 # ===========================================================================
 
 import requests
@@ -1238,32 +1238,20 @@ def notify_email(pkg: dict) -> dict:
     if risk["severity"] != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
 
-    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL and ALERT_EMAILS):
-        return {"sent": False, "reason": "missing_config"}
-
-    # محتوى إيميل مخصص ومبسط لتجنب أخطاء الـ Template
-    email_html = f"<h2>SentriX Critical Alert</h2><p>Incident: {inc['id']}</p><p>Severity: {risk['severity']}</p>"
-
-    try:
-        response = requests.post(
-            "https://comms.twilio.com/v1/Emails",
-            auth=(TWILIO_SID, TWILIO_TOKEN),
-            json={
-                "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
-                "to": [{"address": email} for email in ALERT_EMAILS],
-                "content": {
-                    "subject": f"SentriX Critical Alert: {inc['id']}",
-                    "html": email_html
-                }
+    # استخدام صيغة الـ Official API المعتمدة
+    response = requests.post(
+        "https://comms.twilio.com/v1/Emails",
+        auth=(TWILIO_SID, TWILIO_TOKEN),
+        json={
+            "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
+            "to": [{"address": "ruba35uj@gmail.com"}],
+            "content": {
+                "subject": f"Critical Incident: {inc['id']}",
+                "html": f"<p><b>SentriX Alert:</b> Critical incident {inc['id']} detected. Title: {inc['title']}</p>"
             }
-        )
-        if response.status_code in (200, 201, 202):
-            result = {"sent": True}
-        else:
-            result = {"sent": False, "reason": f"HTTP {response.status_code}"}
-    except Exception as e:
-        result = {"sent": False, "reason": str(e)[:50]}
-
+        }
+    )
+    result = {"sent": response.status_code == 200, "status": response.status_code}
     LAST_EMAIL = result
     return result
 
@@ -1272,27 +1260,26 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
     if severity != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
 
+    # استخدام مكتبة Client الرسمية كما في توثيقهم
     client = Client(TWILIO_SID, TWILIO_TOKEN)
     target_phone = "+966537020435"
     results = []
 
-    # 1. إرسال SMS مخصص
+    # 1. SMS (بالصيغة الرسمية)
     try:
-        msg = client.messages.create(
+        message = client.messages.create(
             to=target_phone,
             from_=TWILIO_PHONE,
-            body=f"SentriX ALERT: Critical incident {ref} detected. Please check dashboard."
+            body=f"SentriX Alert: Critical incident {ref} detected. Login required."
         )
-        results.append({"type": "sms", "sid": msg.sid})
+        results.append({"type": "sms", "sid": message.sid})
     except Exception as e:
         results.append({"type": "sms", "error": str(e)[:50]})
 
-    # 2. إجراء اتصال صوتي (Voice Call) باسم SentriX
+    # 2. VOICE CALL (بالصيغة الرسمية مع استخدام الـ URL المعتمد)
     try:
-        # نص مخصص باللغة الإنجليزية يسهل على المساعد الصوتي نطق اسم تطبيقك
-        custom_twiml = f"<Response><Say voice='alice'>Attention. SentriX security engine has detected a critical incident. Incident reference {ref}. Please check the system.</Say></Response>"
         call = client.calls.create(
-            twiml=custom_twiml,
+            url="https://webhooks.twilio.com/v1/Voice/Template/voice_speech_recognition",
             to=target_phone,
             from_=TWILIO_PHONE
         )
