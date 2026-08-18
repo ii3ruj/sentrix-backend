@@ -460,7 +460,9 @@ def find_package(incident_id: str):
                 return pkg
     return None
 
-def now_iso() -> str: return datetime.now(timezone.utc).isoformat()
+KSA_TZ = timezone(timedelta(hours=3))
+
+def now_iso() -> str: return datetime.now(KSA_TZ).isoformat()
 def sha256_of(data: bytes) -> str: return hashlib.sha256(data).hexdigest()
 def canonical_json(obj) -> bytes: return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
 
