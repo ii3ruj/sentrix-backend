@@ -539,6 +539,30 @@ async def download_archive(incident_id: str):
 async def generate_and_archive_report(request: Request):
     return {"success": True, "message": "Report successfully archived."}
 
+from fastapi import Body
+
+@app.post("/api/auth/login")
+async def api_login(credentials: dict = Body(...)):
+    email = credentials.get("email")
+    password = credentials.get("password")
+    
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    
+    try:
+        # تسجيل الدخول عبر Supabase Auth الحقيقي
+        auth_response = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+        
+        # استخراج التوكن الحقيقي وإرساله للفرونت إند
+        token = auth_response.session.access_token
+        return {"token": token, "user": auth_response.user}
+        
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
 # ===========================================================================
 # 🚨 ADMIN CLEAR CACHE & DB 🚨
 # ===========================================================================
