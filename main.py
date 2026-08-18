@@ -1224,16 +1224,13 @@ async def upload_pdf(
     }
     return result
 # ===========================================================================
-# 9. TWILIO EMAIL, SMS & VOICE CALLS (OFFICIAL API INTEGRATION)
+# 9. TWILIO EMAIL, SMS & VOICE CALLS (SENTRIX CUSTOM INTEGRATION)
 # ===========================================================================
 
 import requests
 from twilio.rest import Client
 
 def notify_email(pkg: dict) -> dict:
-    """
-    إرسال إيميل تنبيه عبر Twilio Email API باستخدام الطريقة الرسمية (requests).
-    """
     global LAST_EMAIL
     risk = pkg["risk"]
     inc = pkg["incident"]
@@ -1244,14 +1241,8 @@ def notify_email(pkg: dict) -> dict:
     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL and ALERT_EMAILS):
         return {"sent": False, "reason": "missing_config"}
 
-    # محتوى الإيميل
-    email_html = f"""
-    <h2>⚠️ SentriX Critical Alert</h2>
-    <p><strong>Incident ID:</strong> {inc['id']}</p>
-    <p><strong>Title:</strong> {inc['title']}</p>
-    <p><strong>Severity:</strong> {risk['severity']}</p>
-    <p>Please log in to the SentriX dashboard to review investigation details.</p>
-    """
+    # محتوى إيميل مخصص ومبسط لتجنب أخطاء الـ Template
+    email_html = f"<h2>SentriX Critical Alert</h2><p>Incident: {inc['id']}</p><p>Severity: {risk['severity']}</p>"
 
     try:
         response = requests.post(
@@ -1261,57 +1252,53 @@ def notify_email(pkg: dict) -> dict:
                 "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
                 "to": [{"address": email} for email in ALERT_EMAILS],
                 "content": {
-                    "subject": f"⚠️ [SentriX Alert] Critical incident on {inc['asset_type']}",
+                    "subject": f"SentriX Critical Alert: {inc['id']}",
                     "html": email_html
                 }
             }
         )
         if response.status_code in (200, 201, 202):
-            result = {"sent": True, "status": response.status_code}
+            result = {"sent": True}
         else:
-            result = {"sent": False, "reason": f"HTTP {response.status_code}: {response.text[:100]}"}
+            result = {"sent": False, "reason": f"HTTP {response.status_code}"}
     except Exception as e:
-        result = {"sent": False, "reason": str(e)[:100]}
+        result = {"sent": False, "reason": str(e)[:50]}
 
     LAST_EMAIL = result
     return result
 
 def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
-    """
-    إرسال SMS و إجراء مكالمة صوتية باستخدام مكتبة Twilio الرسمية.
-    """
     global LAST_TWILIO
     if severity != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
 
-    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE):
-        return {"sent": False, "reason": "missing_config"}
-
-    target_phone = "+966537020435"
     client = Client(TWILIO_SID, TWILIO_TOKEN)
+    target_phone = "+966537020435"
     results = []
 
-    # 1. إرسال SMS
+    # 1. إرسال SMS مخصص
     try:
         msg = client.messages.create(
             to=target_phone,
             from_=TWILIO_PHONE,
-            body=f"SentriX Alert: Critical incident {ref} detected. Risk: {risk_score}/100."
+            body=f"SentriX ALERT: Critical incident {ref} detected. Please check dashboard."
         )
         results.append({"type": "sms", "sid": msg.sid})
     except Exception as e:
-        results.append({"type": "sms", "error": str(e)[:100]})
+        results.append({"type": "sms", "error": str(e)[:50]})
 
-    # 2. إجراء اتصال صوتي (Voice Call) بالقالب الرسمي
+    # 2. إجراء اتصال صوتي (Voice Call) باسم SentriX
     try:
+        # نص مخصص باللغة الإنجليزية يسهل على المساعد الصوتي نطق اسم تطبيقك
+        custom_twiml = f"<Response><Say voice='alice'>Attention. SentriX security engine has detected a critical incident. Incident reference {ref}. Please check the system.</Say></Response>"
         call = client.calls.create(
-            url="https://webhooks.twilio.com/v1/Voice/Template/voice_speech_recognition",
+            twiml=custom_twiml,
             to=target_phone,
             from_=TWILIO_PHONE
         )
         results.append({"type": "voice", "sid": call.sid})
     except Exception as e:
-        results.append({"type": "voice", "error": str(e)[:100]})
+        results.append({"type": "voice", "error": str(e)[:50]})
 
     result = {"sent": True, "results": results}
     LAST_TWILIO = result
