@@ -46,13 +46,9 @@ TWILIO_TOKEN = os.environ.get("TWILIO_TOKEN")
 TWILIO_PHONE = os.environ.get("TWILIO_PHONE")
 TEAM_NUMBERS = [n.strip() for n in os.environ.get("TEAM_NUMBERS", "").split(",") if n.strip()]
 
-# تنبيهات البريد للحوادث الحرجة
+# إعدادات Twilio Email API الجديدة
+TWILIO_FROM_EMAIL = os.environ.get("TWILIO_FROM_EMAIL")
 ALERT_EMAILS = [e.strip() for e in os.environ.get("ALERT_EMAILS", "ruba35uj@gmail.com").split(",") if e.strip()]
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
-SMTP_FROM = os.environ.get("SMTP_FROM") or SMTP_USER
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
@@ -89,25 +85,17 @@ PUBLIC_PATHS = [
     "/openapi.json"
 ]
 
-# ---------------------------------------------------------------------------
-# توكن محلي موقّع (HMAC) — لا يعتمد على وجود مستخدم في Supabase Auth.
-# هذا هو سبب تعليق تسجيل الدخول سابقاً: الحارس كان يتحقق عبر
-# supabase.auth.get_user() فقط، وحسابات الفريق موجودة في جدول users
-# وليست في Supabase Auth، فكان كل طلب يرجع 401.
-# ---------------------------------------------------------------------------
 AUTH_SECRET = os.environ.get("AUTH_SECRET", "sentrix-local-secret-change-me")
 TOKEN_TTL_HOURS = int(os.environ.get("TOKEN_TTL_HOURS", "12"))
 
-# حسابات المنصة. كلمات المرور تُضبط من متغيرات البيئة في الإنتاج.
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "A123sentrix*")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "A123sentrix*")
 
 BUILTIN_ACCOUNTS = {
     "analyst@sentrix.com": {"password": DEMO_PASSWORD, "role": "analyst",
                             "name": "SOC Analyst", "active": True},
-    "admin@sentrix.com":   {"password": ADMIN_PASSWORD, "role": "admin",
+    "admin@sentrix.com":    {"password": ADMIN_PASSWORD, "role": "admin",
                             "name": "SentriX Admin", "active": True},
-    # حساب غير مفعّل — يُستخدم لعرض حالة "بانتظار التفعيل"
     "pending@sentrix.com": {"password": DEMO_PASSWORD, "role": "analyst",
                             "name": "Pending Analyst", "active": False},
 }
@@ -151,21 +139,14 @@ def verify_local_token(token: str) -> dict | None:
 async def centralized_auth_guard(request: Request, call_next):
     path = request.url.path
 
-    # 1. السماح للمسارات العامة بالمرور بدون توكن
     if any(path.startswith(p) for p in PUBLIC_PATHS) or not path.startswith("/api/"):
         return await call_next(request)
 
-    # طلبات preflight لازم تمر وإلا ينكسر CORS من المتصفح
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    # 2. التحقق من وجود التوكن
     auth_header = request.headers.get("Authorization")
 
-    # تنزيل الـPDF يتم بفتح رابط مباشر في تبويب جديد، والمتصفح لا يرسل
-    # هيدر Authorization في هذه الحالة — ولهذا كان يظهر
-    # "Unauthorized: Missing or invalid token".
-    # لذلك يُقبل التوكن أيضاً كمعامل استعلام لمسارات التنزيل وحدها.
     if not auth_header and path.endswith("/download"):
         query_token = request.query_params.get("token")
         if query_token:
@@ -180,12 +161,9 @@ async def centralized_auth_guard(request: Request, call_next):
 
 
 async def _authorize(request, call_next, token: str):
-
-    # 3أ. توكن SentriX المحلي
     if verify_local_token(token):
         return await call_next(request)
 
-    # 3ب. توكن Supabase Auth (لمن أنشأ حساباً هناك)
     try:
         if supabase:
             user = supabase.auth.get_user(jwt=token)
@@ -209,19 +187,14 @@ FEATURE_KEYS = [
     "Down/Up Ratio", "Avg Packet Size", "Fwd Seg Size Min",
 ]
 
-# ===========================================================================
-# 3. CRSI CONSTANTS & FALLBACK PLAYBOOKS
-# ===========================================================================
 CRSI_DOMAINS = {
     "identify_access":  {"name": "Identify & Access", "weight": 0.18, "ref": "NIST PR.AC | ISO 27001 A.9 | NCA 2-2"},
     "network_security": {"name": "Network Security",  "weight": 0.17, "ref": "NIST PR.PT | ISO 27001 A.13 | NCA 2-5"},
     "endpoint_security":{"name": "Endpoint Security", "weight": 0.17, "ref": "NIST DE.CM | ISO 27001 A.12 | NCA 2-3"},
     "detect_respond":   {"name": "Detect & Respond",  "weight": 0.18, "ref": "NIST DE.AE | ISO 27001 A.16 | NCA 2-13"},
     "backup_recovery":  {"name": "Backup & Recovery", "weight": 0.15, "ref": "NIST RC.RP | ISO 27001 A.12.3 | NCA 2-9"},
-    "nca_controls":     {"name": "NCA Controls",      "weight": 0.15, "ref": "NCA ECC-1:2018"},
+    "nca_controls":     {"name": "NCA Controls",       "weight": 0.15, "ref": "NCA ECC-1:2018"},
 }
-# معايرة: القيم السابقة كانت تُنزل الدرجة إلى الصفر بعد حوادث قليلة
-# فتبقى "Critical" دائماً ولا تعكس أي تغيّر في الوضع.
 CRSI_PENALTY = {"Critical": 12.0, "High": 7.0, "Medium": 3.0, "Low": 0.0}
 CRSI_SPILLOVER = 0.20
 CRSI_WINDOW = 20
@@ -241,27 +214,27 @@ THREAT_TYPE_ALIASES = {
 }
 
 MITRE_MAP = {
-    "ransomware":     {"domains": ["endpoint_security", "backup_recovery", "detect_respond"],
-                       "tactics": ["Impact", "Defense Evasion"],
-                       "techniques": ["T1486", "T1490", "T1070"]},
-    "brute_force":    {"domains": ["identify_access", "detect_respond"],
-                       "tactics": ["Credential Access", "Initial Access"],
-                       "techniques": ["T1110", "T1078"]},
-    "ddos":           {"domains": ["network_security", "detect_respond"],
-                       "tactics": ["Impact"],
-                       "techniques": ["T1498", "T1499"]},
-    "phishing":       {"domains": ["identify_access", "nca_controls"],
-                       "tactics": ["Initial Access", "Credential Access"],
-                       "techniques": ["T1566", "T1204"]},
-    "malware":        {"domains": ["endpoint_security", "detect_respond"],
-                       "tactics": ["Execution", "Persistence"],
-                       "techniques": ["T1204", "T1547", "T1059"]},
+    "ransomware":      {"domains": ["endpoint_security", "backup_recovery", "detect_respond"],
+                        "tactics": ["Impact", "Defense Evasion"],
+                        "techniques": ["T1486", "T1490", "T1070"]},
+    "brute_force":     {"domains": ["identify_access", "detect_respond"],
+                        "tactics": ["Credential Access", "Initial Access"],
+                        "techniques": ["T1110", "T1078"]},
+    "ddos":            {"domains": ["network_security", "detect_respond"],
+                        "tactics": ["Impact"],
+                        "techniques": ["T1498", "T1499"]},
+    "phishing":        {"domains": ["identify_access", "nca_controls"],
+                        "tactics": ["Initial Access", "Credential Access"],
+                        "techniques": ["T1566", "T1204"]},
+    "malware":         {"domains": ["endpoint_security", "detect_respond"],
+                        "tactics": ["Execution", "Persistence"],
+                        "techniques": ["T1204", "T1547", "T1059"]},
     "insider_threat": {"domains": ["identify_access", "nca_controls"],
-                       "tactics": ["Exfiltration", "Collection"],
-                       "techniques": ["T1041", "T1005"]},
-    "benign":         {"domains": [], "tactics": [], "techniques": []},
-    "_default":       {"domains": ["detect_respond"],
-                       "tactics": ["Execution"], "techniques": ["T1059"]},
+                        "tactics": ["Exfiltration", "Collection"],
+                        "techniques": ["T1041", "T1005"]},
+    "benign":          {"domains": [], "tactics": [], "techniques": []},
+    "_default":        {"domains": ["detect_respond"],
+                        "tactics": ["Execution"], "techniques": ["T1059"]},
 }
 
 PLAYBOOKS = {
@@ -275,9 +248,6 @@ PLAYBOOKS = {
     "_default": {"name": "GENERIC_RESPONSE_PLAYBOOK", "actions": [("Isolate the affected asset", "Isolate the asset.", "HIGH"), ("Preserve logs", "Collect relevant logs.", "MEDIUM")]},
 }
 
-# ===========================================================================
-# 4. LOCAL MIRROR
-# ===========================================================================
 PKG_FILE = DB_DIR / "packages.json"
 CRSI_FILE = DB_DIR / "crsi_archives.json"
 
@@ -292,17 +262,14 @@ def _write_mirror(rows: list) -> None:
 
 PACKAGES: list = _read_mirror()
 
-
 def _read_crsi_archives() -> list:
     if CRSI_FILE.exists():
         try: return json.loads(CRSI_FILE.read_text(encoding="utf-8"))
         except Exception: return []
     return []
 
-
 def _write_crsi_archives(rows: list) -> None:
     CRSI_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-
 
 CRSI_ARCHIVES: list = _read_crsi_archives()
 
@@ -310,12 +277,7 @@ SUPABASE_ERRORS: list = []
 LAST_TWILIO: dict = {"sent": None, "reason": "no critical incident yet"}
 LAST_EMAIL: dict = {"sent": None, "reason": "no critical incident yet"}
 
-
 def sb_insert(table: str, row: dict) -> bool:
-    """
-    كان الفشل يُطبع في اللوج فقط، فلا تعرف الواجهة أن التخزين لم يحدث.
-    الآن يُحفظ آخر خطأ ويظهر في /api/debug/config.
-    """
     if not supabase:
         SUPABASE_ERRORS.append({"table": table, "error": "supabase client not configured", "at": now_iso()})
         del SUPABASE_ERRORS[:-20]
@@ -342,12 +304,6 @@ def hydrate_from_supabase() -> None:
     except Exception as e: print(f"[supabase] hydrate failed: {e}")
 
 def next_incident_ref() -> str:
-    """
-    كان الترقيم يعتمد على len(PACKAGES)، فيعيد البدء من INC-0001 بعد كل
-    إعادة نشر (القرص مؤقت) وعند بلوغ سقف الذاكرة — فتتكرر المعرّفات
-    وتفتح الروابط على حادثة غير موجودة ("Incident not found").
-    الآن يُشتق الرقم من أعلى معرّف موجود فعلاً.
-    """
     highest = 0
     for pkg in PACKAGES:
         match = re.match(r"^INC-(\d+)$", str((pkg.get("incident") or {}).get("id") or ""))
@@ -355,9 +311,7 @@ def next_incident_ref() -> str:
             highest = max(highest, int(match.group(1)))
     return f"INC-{highest + 1:04d}"
 
-
 def find_package(incident_id: str):
-    """مطابقة متسامحة: المعرّف الكامل أو الـuuid أو رقم التقرير أو الرقم وحده."""
     wanted = str(incident_id or "").strip().upper()
     if not wanted:
         return None
@@ -376,13 +330,11 @@ def find_package(incident_id: str):
             if str((pkg.get("incident") or {}).get("id") or "").upper() == padded:
                 return pkg
     return None
+
 def now_iso() -> str: return datetime.now(timezone.utc).isoformat()
 def sha256_of(data: bytes) -> str: return hashlib.sha256(data).hexdigest()
 def canonical_json(obj) -> bytes: return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
 
-# ===========================================================================
-# 5. CORE PIPELINE (MERGED LOGIC)
-# ===========================================================================
 class IncidentIn(BaseModel):
     title: str | None = None
     incident_type: str = "malware"
@@ -401,30 +353,21 @@ class IncidentIn(BaseModel):
 
 _FEATURE_LOOKUP = {"".join(k.lower().split()): k for k in FEATURE_KEYS}
 
-# عيّنات حقيقية من بيانات التدريب — تُستخدم لتوليد حركة واقعية
 TRAFFIC_PROFILES: dict = {}
 try:
     _profiles_path = BASE_DIR / "traffic_profiles.json"
     if _profiles_path.exists():
         _loaded = json.loads(_profiles_path.read_text(encoding="utf-8"))
         TRAFFIC_PROFILES = {k: v for k, v in _loaded.items() if not k.startswith("_")}
-        print(f"[traffic] loaded profiles: " +
-              ", ".join(f"{k}={len(v)}" for k, v in TRAFFIC_PROFILES.items()))
-    else:
-        print("[traffic] traffic_profiles.json not found — using fallback generator")
 except Exception as _e:
-    print(f"[traffic] failed to load profiles: {_e}")
-
+    pass
 
 def _match_feature(cell) -> str | None:
-    """مطابقة اسم الخاصية بغض النظر عن المسافات وحالة الأحرف."""
     if cell is None:
         return None
     return _FEATURE_LOOKUP.get("".join(str(cell).lower().split()))
 
-
 def _to_number(cell) -> float | None:
-    """تحويل آمن يتجاهل الفواصل والوحدات والرموز."""
     if cell is None:
         return None
     cleaned = str(cell).replace(",", "").replace("%", "").strip()
@@ -435,7 +378,6 @@ def _to_number(cell) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
-
 
 def features_complete(features: dict | None) -> bool:
     if not features: return False
@@ -466,23 +408,17 @@ def process_incident(payload: IncidentIn) -> dict:
             })
         except Exception as e: print(f"[datarobot modular error] {e}")
 
-    # كل حادثة — أياً كان مصدرها — تمر على محرك الخطورة نفسه.
-    # الشدة العشوائية السابقة لحوادث السيرفر كانت تلغي نتيجة DataRobot
-    # وتجعل كل الحوادث متشابهة.
     try:
         risk_result = calculate_risk(
             anomaly_score=ai_data["anomaly_score"], asset_criticality=payload.asset_criticality,
             exposure=payload.exposure, vulnerability_level=payload.vulnerability_level, business_impact=payload.business_impact,
         )
     except ValueError as e:
-        # قيمة سياق غير معروفة كانت تُسقط الطلب كاملاً (500) فلا تُسجَّل الحادثة
-        print(f"[risk] invalid context, falling back to defaults: {e}")
         risk_result = calculate_risk(
             anomaly_score=ai_data["anomaly_score"], asset_criticality="medium",
             exposure="internal", vulnerability_level="medium", business_impact="medium",
         )
     severity_raw = str(risk_result.get("severity", "LOW")).upper()
-    # المسار القصير للحوادث المنخفضة فقط — لا لكل حادثة بلا فيتشرز
     flow = "short_path" if severity_raw == "LOW" else "full_path"
     risk = {
         "risk_score": risk_result.get("risk_score"), "severity": severity_raw.capitalize(),
@@ -492,15 +428,10 @@ def process_incident(payload: IncidentIn) -> dict:
         "risk_factors": risk_result.get("risk_factors", {}), "flow": flow
     }
 
-    # مفاتيح THREAT_PROFILES في threat_service مكتوبة بصيغة أخرى
-    # ("Brute-force" / "DDoS" / "Infiltration"...)، فكان كل نوع يخرج
-    # is_unmapped=True بلا MITRE ولا CIA. هذه الخريطة توفّق بين الاثنين.
     threat_result = analyze_threat(THREAT_TYPE_ALIASES.get(itype, itype))
     mitre_ref = MITRE_MAP.get(itype, MITRE_MAP["_default"])
     tactics = [t.get("name") if isinstance(t, dict) else t for t in threat_result.get("mitre_tactics", [])]
     techniques = [t.get("id") if isinstance(t, dict) else t for t in threat_result.get("mitre_techniques", [])]
-    # ملفات threat_service لا تحمل تقنيات إلا لنوع واحد، فتظهر الخانة فارغة
-    # في صفحة التحليل. نكملها من الخريطة المرجعية عند غيابها.
     if not tactics:
         tactics = mitre_ref.get("tactics", [])
     if not techniques:
@@ -550,16 +481,16 @@ def process_incident(payload: IncidentIn) -> dict:
     }
 
     PACKAGES.insert(0, package)
-    del PACKAGES[MAX_PACKAGES:]          # حد أعلى للذاكرة والملف المحلي
+    del PACKAGES[MAX_PACKAGES:]
     _write_mirror(PACKAGES)
     package["persistence"] = persist_to_supabase(package, incident_uuid, pdf_bytes)
     package["notification"] = notify_twilio(ref, risk["severity"], itype, risk["risk_score"])
+    
+    # استدعاء دالة إرسال الإيميل عبر Twilio API الجديد
     package["email_notification"] = notify_email(package)
+    
     return package
 
-# ===========================================================================
-# Helper Functions for CRSI
-# ===========================================================================
 def compute_crsi(packages: list) -> dict:
     scores = {k: 100.0 for k in CRSI_DOMAINS}
     hits = {k: 0 for k in CRSI_DOMAINS}
@@ -611,9 +542,6 @@ def persist_to_supabase(pkg: dict, incident_uuid: str, pdf_bytes: bytes) -> dict
     status["archives"] = sb_insert("archives", {"id": pkg["archive"]["archive_id"], "report_id": report_uuid, "report_snapshot": pkg, "pdf_path": pkg["archive"]["pdf_path"], "archive_period": datetime.now(timezone.utc).strftime("%Y-%m"), "sha256_hash": pkg["archive"]["sha256"]})
     return {"stored": all(status.values()), "tables": status}
 
-# ===========================================================================
-# 6. PDF RENDERER
-# ===========================================================================
 def render_pdf(pkg: dict) -> bytes:
     styles = getSampleStyleSheet()
     buf = io.BytesIO()
@@ -653,9 +581,6 @@ def render_pdf(pkg: dict) -> bytes:
     doc.build(story)
     return buf.getvalue()
 
-# ===========================================================================
-# 7. FASTAPI ENDPOINTS (React Frontend Routes)
-# ===========================================================================
 @app.get("/api/dashboard/stats")
 async def dashboard_stats():
     counts = {}
@@ -669,9 +594,6 @@ async def dashboard_stats():
         if s in sev: sev[s] += 1
     analyzed = sum(1 for p in PACKAGES if p["ai_result"]["anomaly_score"] is not None)
     
-    # النافذة كانت 24 ساعة مقابل 24 قبلها. بما أن المنصة تعمل منذ ساعات فقط،
-    # كانت النافذة السابقة فارغة دائماً فتثبت النسبة على 100% ولا تتحرك.
-    # نافذة قصيرة قابلة للضبط تجعل الأرقام تتحرك فعلياً مع تدفق الحوادث.
     now = datetime.now(timezone.utc)
     W = TREND_WINDOW_HOURS
 
@@ -735,7 +657,6 @@ async def list_incidents():
         "flow": p["risk"]["flow"], "hasAiResult": p["ai_result"]["anomaly_score"] is not None,
         "ai_score": p["ai_result"]["anomaly_score"], "playbook": p["recommendation"]["playbook"],
     } for p in PACKAGES]
-    # ترتيب صريح بالأحدث أولاً حتى تظهر الحوادث الجديدة في أول الصفحة دائماً
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     return rows
 
@@ -777,9 +698,6 @@ async def recommendations(incident_id: str | None = None):
 @app.get("/api/crsi-assessment")
 async def crsi_assessment():
     crsi = compute_crsi(PACKAGES)
-    
-    # يُعاد حساب الدرجة كما كانت في نهاية كل يوم من الحوادث الفعلية.
-    # القيم العشوائية السابقة كانت تتغير مع كل تحديث وتخالف درجة صفحة التوصيات.
     daily_history = []
     today = datetime.now(timezone.utc).date()
 
@@ -817,7 +735,6 @@ async def crsi_recommendations():
     if not actions: 
         actions.append({"id": 1, "title": "Maintain Security Posture", "description": "No critical weaknesses detected.", "priority": "Low", "status": "Pending"})
         
-    # توليد اسم Playbook ديناميكي للـ CRSI
     weak_domains = [d for d in crsi["breakdown"] if d["is_weak"]]
     if weak_domains:
         weakest = min(weak_domains, key=lambda x: x["score"])
@@ -833,7 +750,6 @@ async def list_archive():
         {**p["archive"], "content": {"incidentTitle": p["incident"]["title"], "severity": p["risk"]["severity"], "riskScore": f"{p['risk']['risk_score']} / 100", "source": p["incident"]["source"], "asset": p["incident"]["asset_type"], "threatType": p["incident"]["incident_type"], "keyFindings": p["key_findings"], "playbook": p["recommendation"]["playbook"], "recommendedActions": [a["title"] for a in p["recommendation"]["actions"]], "inputMethod": p["incident"].get("input_method"), "sourceFile": p["incident"].get("source_file_name")}}
         for p in PACKAGES
     ]
-    # تقارير الـCRSI المؤرشفة فعلياً (لا لقطة مؤقتة تُبنى مع كل طلب)
     rows.extend(CRSI_ARCHIVES)
     rows.sort(key=lambda r: str(r.get("archived_at") or ""), reverse=True)
     return rows
@@ -842,9 +758,7 @@ async def list_archive():
 async def verify_archive(incident_id: str):
     p = find_package(incident_id)
     if not p: raise HTTPException(404, f"Archive record for {incident_id} not found")
-    # يُعاد حساب البصمة فعلياً ثم تُقارن بالمخزّنة.
-    # نستثني المفتاحين اللذين أُضيفا بعد لحظة الحساب: archive و notification.
-    snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification", "persistence")}
+    snapshot = {k: v for k, v in p.items() if k not in ("archive", "notification", "persistence", "email_notification")}
     current = sha256_of(canonical_json(snapshot))
     stored = p["archive"]["sha256"]
     return {
@@ -865,10 +779,6 @@ async def download_archive(incident_id: str):
 
 @app.post("/api/crsi-assessment/archive")
 async def archive_crsi_report():
-    """
-    يؤرشف لقطة مجمّدة من تقييم الـCRSI الحالي.
-    كان هذا المسار يرجع رسالة نجاح فقط بلا تخزين، فلا يظهر شيء في الأرشيف.
-    """
     crsi = compute_crsi(PACKAGES)
     stamp = datetime.now(timezone.utc)
     snapshot = {
@@ -929,19 +839,12 @@ from fastapi import Body
 
 @app.post("/api/auth/login")
 async def api_login(credentials: dict = Body(...)):
-    """
-    ثلاث طرق للتحقق بالترتيب، وأول واحدة تنجح تصدر التوكن:
-      1. Supabase Auth (لمن أنشأ الحساب هناك)
-      2. جدول users في Supabase — مقارنة sha256(password) بـ password_hash
-      3. بيانات العرض من متغيرات البيئة DEMO_EMAIL / DEMO_PASSWORD
-    """
     email = str(credentials.get("email") or "").strip().lower()
     password = str(credentials.get("password") or "")
 
     if not email or not password:
         raise HTTPException(status_code=401, detail="Email and password are required.")
 
-    # 1) Supabase Auth
     if supabase:
         try:
             auth_response = supabase.auth.sign_in_with_password(
@@ -954,9 +857,8 @@ async def api_login(credentials: dict = Body(...)):
                     "auth_source": "supabase_auth",
                 }
         except Exception as exc:
-            print(f"[auth] supabase auth failed for {email}: {exc}")
+            pass
 
-    # 2) جدول users
     if supabase:
         try:
             res = supabase.table("users").select("*").eq("email", email).limit(1).execute()
@@ -971,9 +873,8 @@ async def api_login(credentials: dict = Body(...)):
                         "auth_source": "users_table",
                     }
         except Exception as exc:
-            print(f"[auth] users table lookup failed: {exc}")
+            pass
 
-    # 3) حسابات المنصة المدمجة
     account = BUILTIN_ACCOUNTS.get(email)
     if account and hmac.compare_digest(password, account["password"]):
         if not account["active"]:
@@ -989,9 +890,6 @@ async def api_login(credentials: dict = Body(...)):
 
     raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
-# ===========================================================================
-# 🚨 ADMIN CLEAR CACHE & DB 🚨
-# ===========================================================================
 @app.get("/api/admin/clear")
 async def clear_database(key: str = Query(None)):
     if key != "SentriX-Queen-Clear":
@@ -1027,9 +925,8 @@ async def debug_config():
             "last_result": LAST_TWILIO,
         },
         "email": {
-            "configured": bool(SMTP_USER and SMTP_PASSWORD),
+            "configured": bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL),
             "recipients": ALERT_EMAILS,
-            "smtp_host": SMTP_HOST,
             "last_result": LAST_EMAIL,
         },
         "traffic_profiles": {k: len(v) for k, v in TRAFFIC_PROFILES.items()},
@@ -1037,26 +934,12 @@ async def debug_config():
         "status": "Ready",
     }
 
-# ===========================================================================
-# 8. DYNAMIC SIMULATOR
-# ===========================================================================
 def synth_features(profile: str = "normal") -> dict:
-    """
-    العيّنات مأخوذة من بيانات التدريب نفسها (clean_ids2018_processed.csv)
-    بعد المرور على StandardScaler، ومقسّمة على ثلاث شرائح حسب بُعدها عن
-    مركز التوزيع: normal / elevated / anomalous.
-
-    القيم الخام السابقة (آلاف وملايين) كانت خارج التوزيع الذي تعلّمه النموذج،
-    فيصنّفها Isolation Forest شذوذاً شديداً في كل مرة — ولهذا كانت أغلب
-    الحوادث Critical.
-    """
     bank = TRAFFIC_PROFILES.get(profile) or TRAFFIC_PROFILES.get("normal") or []
     if not bank:
-        # احتياطي فقط إذا تعذّر تحميل ملف العيّنات
         return {f: round(random.gauss(0, 0.6), 5) for f in FEATURE_KEYS}
 
     sample = list(random.choice(bank))
-    # اهتزاز طفيف حتى لا تتكرر الحادثة حرفياً، دون إخراجها من شريحتها
     jitter = 0.03
     return {
         f: round(sample[i] + random.gauss(0, jitter), 5)
@@ -1065,23 +948,16 @@ def synth_features(profile: str = "normal") -> dict:
     }
 
 def build_sim_incident() -> IncidentIn:
-    # 1. التوزيع العادل لتقليل عدد الـ Critical (2% فقط)
     types = ["benign", "phishing", "brute_force", "malware", "ddos", "ransomware", "insider_threat"]
     weights = [35, 25, 20, 10, 5, 3, 2]
     itype = random.choices(types, weights=weights)[0]
     
-    # 3. تنويع المصادر
     sources = ["EDR", "SIEM", "Firewall", "IDS", "DLP", "SOAR", "Email Gateway", "WAF"]
-    # الشريحة التي تُسحب منها الفيتشرز حسب طبيعة النوع
-    # الشذوذ الشديد محجوز للهجمات التي تُحدث انحرافاً حقيقياً في الشبكة.
-    # وضع malware ضمنها كان يرفع نسبة الحوادث الحرجة إلى 20%.
     profile = (
         "normal" if itype in ("benign", "phishing")
         else "anomalous" if itype in ("ransomware", "ddos")
         else "elevated"
     )
-    hot = itype in ["ransomware", "ddos"]
-    # تدرّج حقيقي في السياق بدل قيمتين فقط، فتتوزع الشدة على المستويات الأربعة
     if itype == "benign":
         crits = ["low"]
     elif itype in ("phishing", "brute_force"):
@@ -1110,13 +986,12 @@ async def simulator_loop():
         await asyncio.sleep(SIM_INTERVAL)
         if not SIM_ENABLED:
             continue
-        # سقف واضح: التوليد المستمر بلا حد كان يُغرق الواجهة والمشرف
         if len(PACKAGES) >= SIM_MAX_INCIDENTS:
             continue
         try:
             process_incident(build_sim_incident())
         except Exception as e:
-            print(f"[simulator] error: {e}")
+            pass
 
 @app.on_event("startup")
 async def startup_event():
@@ -1129,12 +1004,6 @@ async def startup_event():
 
 @app.get("/api/incidents/template/download")
 async def download_pdf_template():
-    """
-    قالب تقرير الحادثة الجاهز للتعبئة.
-    يحتوي جدول الـ37 خاصية بأسمائها الحرفية كما يتوقعها المستخرج، مع قيم
-    مثال مأخوذة من شريحة الحركة الطبيعية في بيانات التدريب — فيكفي أن يستبدل
-    المحلل القيم بقيمه ويرفع الملف ليعمل النموذج مباشرة.
-    """
     styles = getSampleStyleSheet()
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, title="SentriX Incident Report Template")
@@ -1204,7 +1073,7 @@ async def download_pdf_template():
     table = Table(feature_rows, colWidths=[250, 240], repeatRows=1)
     table.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dbeafe")),
+        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#dbeafe")),
         ("FONTSIZE", (0, 0), (-1, -1), 7.5),
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
@@ -1223,7 +1092,6 @@ async def download_pdf_template():
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="SentriX_Incident_Report_Template.pdf"'},
     )
-
 
 @app.post("/api/incidents/upload-pdf")
 async def upload_pdf(
@@ -1247,9 +1115,6 @@ async def upload_pdf(
             with pdfplumber.open(tmp) as pdf:
                 text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
 
-                # المطابقة الحرفية السابقة كانت تفشل مع اختلاف المسافات أو
-                # حالة الأحرف، والتحويل يفشل مع الفواصل والوحدات — فتخرج
-                # قائمة ناقصة فيسقط الملف إلى context_only ولا يُستدعى النموذج.
                 for page in pdf.pages:
                     for tbl in (page.extract_tables() or []):
                         for row in tbl:
@@ -1265,7 +1130,6 @@ async def upload_pdf(
                                         extracted[key] = value
                                         break
 
-                # صيغة "Feature: value" داخل النص لمن لا يضع جدولاً
                 for line in text.splitlines():
                     if ":" not in line:
                         continue
@@ -1291,19 +1155,13 @@ async def upload_pdf(
                 itype = candidate.replace(" ", "_").replace("insider", "insider_threat")
                 break
 
-        import re
         m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", text)
         if m:
             src_ip = m.group(1)
     except Exception as e:
-        print(f"[pdf] extraction failed: {e}")
+        pass
 
-    # حشو الفيتشرز الناقصة بأصفار كان يرسل بيانات مزيّفة إلى النموذج،
-    # فتخرج نفس النتيجة لكل ملف. الآن لا يُستدعى النموذج إلا بفيتشرز كاملة فعلاً.
     complete = features_complete(extracted)
-
-    # السياق يُقرأ من التقرير نفسه بدل قيم ثابتة لكل ملف،
-    # وهذا سبب خروج نفس التحليل المحفوظ مع كل رفع.
     lower_text = (text or "").lower()
 
     def pick(keys, options, default):
@@ -1315,7 +1173,7 @@ async def upload_pdf(
         return default
 
     asset_criticality = pick(["asset criticality", "criticality"],
-                             ["critical", "high", "medium", "low"], "high")
+                            ["critical", "high", "medium", "low"], "high")
     exposure = pick(["exposure"], ["internet_facing", "internet facing", "dmz", "internal"],
                     "internet_facing" if itype in ("ddos", "ransomware") else "internal")
     exposure = exposure.replace("internet facing", "internet_facing")
@@ -1366,12 +1224,11 @@ async def upload_pdf(
     return result
 
 # ===========================================================================
-# 9. TWILIO
+# 9. TWILIO EMAIL & SMS
 # ===========================================================================
 def notify_email(pkg: dict) -> dict:
     """
-    يرسل تنبيهاً بالبريد للحوادث الحرجة فقط.
-    يستخدم SMTP من المكتبة القياسية — بلا أي اعتمادية إضافية.
+    يرسل تنبيهاً بالبريد الإلكتروني للحوادث الحرجة عبر Twilio Email API.
     """
     global LAST_EMAIL
     risk = pkg["risk"]
@@ -1380,11 +1237,10 @@ def notify_email(pkg: dict) -> dict:
     if risk["severity"] != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
 
-    if not (SMTP_USER and SMTP_PASSWORD and ALERT_EMAILS):
-        missing = [n for n, v in (("SMTP_USER", SMTP_USER), ("SMTP_PASSWORD", SMTP_PASSWORD),
-                                  ("ALERT_EMAILS", ALERT_EMAILS)) if not v]
+    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM_EMAIL and ALERT_EMAILS):
+        missing = [n for n, v in (("TWILIO_SID", TWILIO_SID), ("TWILIO_TOKEN", TWILIO_TOKEN),
+                                  ("TWILIO_FROM_EMAIL", TWILIO_FROM_EMAIL), ("ALERT_EMAILS", ALERT_EMAILS)) if not v]
         result = {"sent": False, "reason": f"missing_config: {', '.join(missing)}", "at": now_iso()}
-        print(f"[email] skipped — {result['reason']}")
         LAST_EMAIL = result
         return result
 
@@ -1392,69 +1248,59 @@ def notify_email(pkg: dict) -> dict:
     rec = pkg.get("recommendation", {})
     actions = "\n".join(f"  {i + 1}. {a['title']}" for i, a in enumerate(rec.get("actions", [])))
 
-    body = f"""SentriX — CRITICAL INCIDENT ALERT
+    email_body = f"""
+    <h2>⚠️ SentriX Critical Security Alert</h2>
+    <p><strong>Incident ID:</strong> {inc['id']}</p>
+    <p><strong>Title:</strong> {inc['title']}</p>
+    <p><strong>Type:</strong> {inc['incident_type']}</p>
+    <p><strong>Source:</strong> {inc['source']}</p>
+    <p><strong>Asset:</strong> {inc['asset_type']} ({inc['asset_criticality']} criticality)</p>
+    <p><strong>Risk Score:</strong> {risk['risk_score']} / 100</p>
+    <p><strong>Severity:</strong> {risk['severity']}</p>
+    <hr>
+    <h3>Recommended Playbook: {rec.get('playbook', 'N/A')}</h3>
+    <pre>{actions}</pre>
+    <p>Please check the SentriX dashboard immediately for the attached PDF report and investigation details.</p>
+    """
 
-Incident ID : {inc['id']}
-Title       : {inc['title']}
-Type        : {inc['incident_type']}
-Source      : {inc['source']}
-Asset       : {inc['asset_type']} ({inc['asset_criticality']} criticality)
-Detected at : {str(inc['created_at'])[:19]} UTC
-
-Risk score  : {risk['risk_score']} / 100
-Severity    : {risk['severity']}
-Priority    : {risk['priority']} (response SLA {risk['sla_hours']}h)
-Scoring     : {risk['scoring_mode']}
-
-Anomaly score     : {pkg['ai_result']['anomaly_score']}
-Dynamic threshold : {risk['dynamic_threshold']}
-
-MITRE tactics    : {', '.join(threat.get('mitre_tactics') or []) or 'N/A'}
-MITRE techniques : {', '.join(threat.get('mitre_techniques') or []) or 'N/A'}
-
-Recommended playbook: {rec.get('playbook', 'N/A')}
-{actions}
-
-Immediate response required.
-
---
-SentriX — AI-Powered Threat Investigation & Incident Response Platform
-"""
+    url = "https://comms.twilio.com/v1/Emails"
+    payload = {
+        "from": {"address": TWILIO_FROM_EMAIL},
+        "to": [{"address": email} for email in ALERT_EMAILS],
+        "content": {
+            "subject": f"⚠️ [SentriX Critical Alert] {inc['incident_type']} on {inc['asset_type']} ({inc['id']})",
+            "html": email_body
+        }
+    }
 
     try:
-        import smtplib
-        from email.message import EmailMessage
-
-        message = EmailMessage()
-        message["Subject"] = f"[SentriX] CRITICAL — {inc['incident_type']} on {inc['asset_type']} ({inc['id']})"
-        message["From"] = SMTP_FROM
-        message["To"] = ", ".join(ALERT_EMAILS)
-        message.set_content(body)
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(message)
-
-        print(f"[email] sent to {', '.join(ALERT_EMAILS)} for {inc['id']}")
-        result = {"sent": True, "to": ALERT_EMAILS, "incident_id": inc["id"], "at": now_iso()}
+        import httpx
+        import base64
+        
+        credentials = f"{TWILIO_SID}:{TWILIO_TOKEN}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/json"
+        }
+        
+        with httpx.Client(timeout=20.0) as client:
+            response = client.post(url, json=payload, headers=headers)
+            if response.status_code in (200, 201, 202):
+                print(f"[twilio-email] sent successfully to {ALERT_EMAILS} for {inc['id']}")
+                result = {"sent": True, "to": ALERT_EMAILS, "incident_id": inc["id"], "at": now_iso()}
+            else:
+                print(f"[twilio-email] FAILED status={response.status_code} resp={response.text}")
+                result = {"sent": False, "reason": f"HTTP {response.status_code}: {response.text[:200]}", "at": now_iso()}
     except Exception as e:
-        # السبب الشائع مع Gmail: لازم App Password لا كلمة المرور العادية
-        print(f"[email] FAILED: {type(e).__name__}: {e}")
+        print(f"[twilio-email] FAILED exception: {e}")
         result = {"sent": False, "reason": f"{type(e).__name__}: {str(e)[:200]}", "at": now_iso()}
 
     LAST_EMAIL = result
     return result
 
-
 def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
-    """
-    كان سبب الفشل يُطبع بسطر واحد بلا تفاصيل، فيصعب معرفة لماذا لا تصل الرسالة.
-    الأسباب الشائعة على الحساب التجريبي:
-      21608  رقم المستقبِل غير موثّق  → Twilio Console ▸ Verified Caller IDs
-      21408  الإرسال إلى المنطقة معطّل → Messaging ▸ Geo Permissions ▸ Saudi Arabia
-      21606  رقم المُرسِل لا يدعم SMS
-    """
     global LAST_TWILIO
     if severity != "Critical":
         return {"sent": False, "reason": "severity_not_critical"}
@@ -1463,7 +1309,6 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
                               ("TWILIO_PHONE", TWILIO_PHONE), ("TEAM_NUMBERS", TEAM_NUMBERS)) if not v]
     if missing:
         result = {"sent": False, "reason": f"missing_config: {', '.join(missing)}", "at": now_iso()}
-        print(f"[twilio] skipped — {result['reason']}")
         LAST_TWILIO = result
         return result
 
@@ -1471,7 +1316,6 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         from twilio.rest import Client
     except Exception as e:
         result = {"sent": False, "reason": f"twilio library not installed: {e}", "at": now_iso()}
-        print(f"[twilio] {result['reason']}")
         LAST_TWILIO = result
         return result
 
@@ -1484,19 +1328,16 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         client = Client(TWILIO_SID, TWILIO_TOKEN)
     except Exception as e:
         result = {"sent": False, "reason": f"client init failed: {str(e)[:200]}", "at": now_iso()}
-        print(f"[twilio] {result['reason']}")
         LAST_TWILIO = result
         return result
 
     for num in TEAM_NUMBERS:
         try:
             msg = client.messages.create(body=body, from_=TWILIO_PHONE, to=num)
-            print(f"[twilio] queued sid={msg.sid} to={num} status={msg.status}")
             results.append({"to": num, "sid": msg.sid, "status": msg.status})
             any_ok = True
         except Exception as e:
             code = getattr(e, "code", None)
-            print(f"[twilio] FAILED to={num} code={code}: {e}")
             results.append({"to": num, "error": str(e)[:250], "code": code})
 
     result = {"sent": any_ok, "results": results, "at": now_iso()}
