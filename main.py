@@ -1264,8 +1264,8 @@ def notify_email(pkg: dict) -> dict:
     """
 
     url = "https://comms.twilio.com/v1/Emails"
-    payload = {
-        "from": {"address": TWILIO_FROM_EMAIL},
+payload = {
+        "from": {"address": TWILIO_FROM_EMAIL, "name": "SentriX Security"},
         "to": [{"address": email} for email in ALERT_EMAILS],
         "content": {
             "subject": f"⚠️ [SentriX Critical Alert] {inc['incident_type']} on {inc['asset_type']} ({inc['id']})",
