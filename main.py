@@ -1769,7 +1769,7 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
 
             try:
                 response = VoiceResponse()
-                response.say(f"Engineering Yahya. Attention. SentriX Security Alert. Critical {incident_type} detected. Incident reference {ref}. Risk score {risk_score}. Please check your dashboard immediately.Engineering Yahya. Attention. SentriX Security Alert. Critical {incident_type} detected. Incident reference {ref}. Risk score {risk_score}. Please check your dashboard immediately.", language="en-US", voice="alice")
+                response.say(f"Engineering yah-yaa. Attention. SentriX Security Alert. Critical {incident_type} detected. Incident reference {ref}. Risk score {risk_score}. Please check your dashboard immediately.Engineering yah-yaa. Attention. SentriX Security Alert. Critical {incident_type} detected. Incident reference {ref}. Risk score {risk_score}. Please check your dashboard immediately.", language="en-US", voice="alice")
                 call = client.calls.create(
                     twiml=str(response),
                     to=target_phone,
