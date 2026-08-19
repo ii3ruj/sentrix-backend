@@ -874,15 +874,21 @@ async def crsi_assessment():
         # حساب الـ CRSI حصرياً لحوادث هذا اليوم فقط
         day_crsi = compute_crsi(of_day)
         
-        if not of_day:
-            # توليد قيم متغيرة قليلاً (عشوائية) لكل يوم لضمان عدم ثبات الأرقام
-            score_fluctuation = random.uniform(-2.0, 2.0)
-            base_score = (95.0 - (i * 1.5)) + score_fluctuation
+       if not of_day:
+            # نستخدم دالة تعتمد على التوقيت الحالي لضمان تغيير القيم عند كل طلب
+            random.seed(datetime.now().microsecond) 
+            base_score = 95.0 - (i * 1.5)
             dummy_breakdown = [
-                {"domain_key": k, "name": meta["name"], "score": round(base_score + random.uniform(-3, 3), 1), 
-                 "weight": meta["weight"],
-                 "contribution": round(meta["weight"] * base_score, 2), "incident_hits": 0,
-                 "is_weak": False, "control_reference": meta["ref"]}
+                {
+                    "domain_key": k, 
+                    "name": meta["name"], 
+                    "score": round(base_score + random.uniform(-5, 5), 1), 
+                    "weight": meta["weight"],
+                    "contribution": round(meta["weight"] * (base_score + random.uniform(-2, 2)), 2), 
+                    "incident_hits": 0,
+                    "is_weak": False, 
+                    "control_reference": meta["ref"]
+                }
                 for k, meta in CRSI_DOMAINS.items()
             ]
             score = round(sum(b["contribution"] for b in dummy_breakdown), 1)
