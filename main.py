@@ -50,11 +50,10 @@ TEAM_NUMBERS = [n.strip() for n in os.environ.get("TEAM_NUMBERS", "").split(",")
 TWILIO_FROM_EMAIL = os.environ.get("TWILIO_FROM_EMAIL")
 ALERT_EMAILS = [e.strip() for e in os.environ.get("ALERT_EMAILS", "ruba35uj@gmail.com").split(",") if e.strip()]
 ARCHIVE_STORAGE_BUCKET = os.environ.get("ARCHIVE_STORAGE_BUCKET", "archives")
-ARCHIVE_STORAGE_BUCKET = os.environ.get("ARCHIVE_STORAGE_BUCKET", "archives")
 
 SIM_ENABLED = os.environ.get("SIM_ENABLED", "true").lower() == "true"
 TREND_WINDOW_HOURS = float(os.environ.get("TREND_WINDOW_HOURS", "1"))
-SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "15"))   # 4 حوادث في الدقيقة
+SIM_INTERVAL = int(os.environ.get("SIM_INTERVAL_SECONDS", "15"))    # 4 حوادث في الدقيقة
 # 0 = بلا سقف: التوليد مستمر ما دامت الخدمة تعمل
 SIM_MAX_INCIDENTS = int(os.environ.get("SIM_MAX_INCIDENTS", "0"))
 MAX_PACKAGES = int(os.environ.get("MAX_PACKAGES", "100000"))
@@ -215,10 +214,9 @@ CRSI_DOMAINS = {
     "endpoint_security":{"name": "Endpoint Security", "weight": 0.17, "ref": "NIST DE.CM | ISO 27001 A.12 | NCA 2-3"},
     "detect_respond":   {"name": "Detect & Respond",  "weight": 0.18, "ref": "NIST DE.AE | ISO 27001 A.16 | NCA 2-13"},
     "backup_recovery":  {"name": "Backup & Recovery", "weight": 0.15, "ref": "NIST RC.RP | ISO 27001 A.12.3 | NCA 2-9"},
-    "nca_controls":     {"name": "NCA Controls",       "weight": 0.15, "ref": "NCA ECC-1:2018"},
+    "nca_controls":     {"name": "NCA Controls",        "weight": 0.15, "ref": "NCA ECC-1:2018"},
 }
-# توصيات مرجعية لكل مجال، مربوطة بالضوابط المعتمدة.
-# التوصية السابقة كانت سطراً عاماً واحداً ("Review X controls") بلا معايير.
+
 CRSI_PLAYBOOK = {
     "identify_access": {
         "playbook": "IDENTITY_AND_ACCESS_HARDENING_PLAN",
@@ -480,7 +478,6 @@ def upload_pdf_to_supabase(pdf_bytes: bytes, incident_id: str) -> dict:
         try:
             bucket.upload(storage_path, pdf_bytes, {"content-type": "application/pdf", "upsert": "false"})
         except Exception:
-            # Some supabase-py versions expect boolean upsert metadata.
             bucket.upload(storage_path, pdf_bytes, {"content-type": "application/pdf", "upsert": False})
         return {"uploaded": True, "storage_path": storage_path, "bucket": ARCHIVE_STORAGE_BUCKET}
     except Exception as e:
@@ -637,13 +634,9 @@ def process_incident(payload: IncidentIn) -> dict:
     }
 
     PACKAGES.insert(0, package)
-    # تم إيقاف سطر القص لكي لا يتوقف أبداً ويستمر لشهور طويلة
-    # del PACKAGES[MAX_PACKAGES:]
     _write_mirror(PACKAGES)
     package["persistence"] = persist_to_supabase(package, incident_uuid, pdf_bytes)
     package["notification"] = notify_twilio(ref, risk["severity"], itype, risk["risk_score"])
-    
-    # استدعاء دالة إرسال الإيميل عبر Twilio API الجديد
     package["email_notification"] = notify_email(package)
     
     return package
@@ -854,8 +847,6 @@ async def recommendations(incident_id: str | None = None):
 
 @app.get("/api/crsi-assessment")
 async def crsi_assessment():
-    """
-    """
     today = datetime.now(KSA_TZ).date()
 
     def pkg_day(pkg):
@@ -871,11 +862,9 @@ async def crsi_assessment():
         day = today - timedelta(days=i)
         of_day = [p for p in PACKAGES if pkg_day(p) == day]
         
-        # حساب الـ CRSI حصرياً لحوادث هذا اليوم فقط
         day_crsi = compute_crsi(of_day)
         
-       if not of_day:
-            # نستخدم دالة تعتمد على التوقيت الحالي لضمان تغيير القيم عند كل طلب
+        if not of_day:
             random.seed(datetime.now().microsecond) 
             base_score = 95.0 - (i * 1.5)
             dummy_breakdown = [
@@ -894,7 +883,6 @@ async def crsi_assessment():
             score = round(sum(b["contribution"] for b in dummy_breakdown), 1)
             breakdown_list = dummy_breakdown
             maturity = "Strong"
-            
         else:
             score = day_crsi["score"]
             breakdown_list = day_crsi["breakdown"]
@@ -906,7 +894,6 @@ async def crsi_assessment():
             "status": "Good" if score >= 70 else "Fair" if score >= 40 else "Poor",
             "maturity_level": maturity,
             "incident_count": len(of_day),
-            # نضمن هنا إرسال القائمة دائماً ولن تكون فارغة أبداً
             "breakdown": breakdown_list if breakdown_list else compute_crsi([])["breakdown"],
         })
 
@@ -918,7 +905,6 @@ async def crsi_assessment():
         "breakdown": latest["breakdown"],
         "incident_count": latest["incident_count"],
         "dailyScores": daily_history,
-        # للمقارنة فقط — الدرجة التراكمية المعروضة في صفحة التوصيات
         "organizational_score": compute_crsi(PACKAGES)["score"],
     }
 
@@ -927,8 +913,6 @@ async def crsi_recommendations():
     crsi = compute_crsi(PACKAGES)
     weak = [d["name"] for d in crsi["breakdown"] if d["is_weak"]]
     
-    # التوصيات مشتقة من ضوابط NCA ECC و ISO/IEC 27001 و NIST CSF،
-    # ومرتبة حسب أضعف المجالات فعلياً. عدد التوصيات يتبع درجة المجال.
     ordered = sorted(crsi["breakdown"], key=lambda d: d["score"])
 
     def depth(score):
@@ -983,7 +967,6 @@ async def crsi_recommendations():
         pb_name = "ORGANIZATIONAL_SECURITY_PLAN"
 
     return {
-        # هذه الصفحة تراكمية: كل حوادث نافذة التقييم، لا يوم واحد
         "scope": "organizational",
         "assessment_window": CRSI_WINDOW,
         "score": crsi["score"],
@@ -1207,9 +1190,6 @@ def build_sim_incident() -> IncidentIn:
     weights = [45, 25, 18, 7, 3, 1, 1] 
     itype = random.choices(types, weights=weights)[0]
     
-    # ضمان أن الـ timestamp صادر باللحظة الحالية ليوم 19-8
-    current_time_str = datetime.now(timezone.utc).isoformat()
-
     return IncidentIn(
         title=f"Auto Simulated {itype.replace('_', ' ').title()}",
         incident_type=itype,
@@ -1230,7 +1210,6 @@ async def simulator_loop():
         await asyncio.sleep(SIM_INTERVAL)
         if not SIM_ENABLED:
             continue
-        # السقف اختياري الآن؛ 0 يعني توليداً مستمراً بلا توقف
         if SIM_MAX_INCIDENTS and len(PACKAGES) >= SIM_MAX_INCIDENTS:
             continue
         try:
@@ -1239,11 +1218,6 @@ async def simulator_loop():
             pass
 
 async def keep_alive_loop():
-    """
-    خطة Render المجانية توقف الخدمة بعد 15 دقيقة خمول، وأول طلب بعدها
-    يستغرق 30-50 ثانية — وهذا سبب بطء الاستجابة بعد كل إعادة تشغيل.
-    نداء ذاتي دوري يبقيها مستيقظة طوال فترة العرض.
-    """
     if not KEEP_ALIVE_URL:
         print("[keepalive] disabled — RENDER_EXTERNAL_URL not set")
         return
@@ -1258,13 +1232,7 @@ async def keep_alive_loop():
             print(f"[keepalive] ping failed: {e}")
         await asyncio.sleep(KEEP_ALIVE_INTERVAL)
 
-
 async def bootstrap():
-    """
-    كل ما يحتاج شبكة يعمل هنا بعد ربط المنفذ، لا داخل startup.
-    استدعاء hydrate_from_supabase داخل startup كان يؤخر استجابة الخدمة
-    بعد كل إعادة تشغيل حتى يرد Supabase.
-    """
     try:
         await asyncio.to_thread(hydrate_from_supabase)
     except Exception as e:
@@ -1280,23 +1248,14 @@ async def bootstrap():
 
     await simulator_loop()
 
-
 @app.on_event("startup")
 async def startup_event():
-    # يرجع فوراً حتى يُربط المنفذ بسرعة ولا يفشل النشر
     asyncio.create_task(bootstrap())
     asyncio.create_task(keep_alive_loop())
-
-# ---------------------------------------------------------------------------
-# قالب Word — مبني بمكتبة zipfile القياسية، بلا أي اعتمادية جديدة.
-# ملف .docx هو في الأصل أرشيف ZIP يحتوي XML، لذلك لا حاجة لتنصيب python-docx
-# على Render (وكل اعتمادية إضافية = مخاطرة نشر إضافية).
-# ---------------------------------------------------------------------------
 
 def _xml_escape(text: str) -> str:
     return (str(text).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
-
 
 def _docx_paragraph(text: str = "", bold: bool = False, size: int = 20,
                     color: str = "000000", space_after: int = 120) -> str:
@@ -1308,12 +1267,10 @@ def _docx_paragraph(text: str = "", bold: bool = False, size: int = 20,
                 f'<w:t xml:space="preserve">{_xml_escape(text)}</w:t></w:r>')
     return (f'<w:p><w:pPr><w:spacing w:after="{space_after}"/></w:pPr>{runs}</w:p>')
 
-
 def _docx_cell(text: str, width: int, bold: bool = False, shade: str = None) -> str:
     fill = f'<w:shd w:val="clear" w:fill="{shade}"/>' if shade else ""
     return (f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{fill}</w:tcPr>'
             f'{_docx_paragraph(text, bold=bold, size=18, space_after=0)}</w:tc>')
-
 
 def _docx_table(rows, widths, header: bool = True) -> str:
     borders = ('<w:tblBorders>' + "".join(
@@ -1334,13 +1291,7 @@ def _docx_table(rows, widths, header: bool = True) -> str:
     return (f'<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/>{borders}</w:tblPr>'
             f'{body}</w:tbl>' + _docx_paragraph(space_after=200))
 
-
 def build_incident_template_docx(values: dict | None = None) -> bytes:
-    """
-    قالب تقرير الحادثة بصيغة Word.
-    values=None يعطي قالباً فارغاً جاهزاً للتعبئة،
-    وتمرير قيم يعطي نسخة معبّأة (تُستخدم في الاختبار والأمثلة).
-    """
     import zipfile
     values = values or {}
 
@@ -1429,12 +1380,7 @@ def build_incident_template_docx(values: dict | None = None) -> bytes:
         archive.writestr("word/document.xml", document)
     return buf.getvalue()
 
-
 def extract_docx_pairs(data: bytes) -> tuple[dict, str]:
-    """
-    يقرأ جداول ملف Word ويرجع (الفيتشرز المستخرجة، النص الكامل).
-    ملف .docx أرشيف ZIP، فالقراءة تتم بـzipfile و ElementTree من المكتبة القياسية.
-    """
     import zipfile
     import xml.etree.ElementTree as ET
 
@@ -1468,10 +1414,8 @@ def extract_docx_pairs(data: bytes) -> tuple[dict, str]:
 
     return extracted, "\n".join(lines)
 
-
 @app.get("/api/incidents/template/docx/download")
 async def download_docx_template():
-    """قالب Word فارغ — أسهل للتعبئة من الـPDF."""
     return Response(
         content=build_incident_template_docx(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1479,13 +1423,8 @@ async def download_docx_template():
                  'attachment; filename="SentriX_Incident_Report_Template.docx"'},
     )
 
-
 @app.post("/api/debug/test-alert")
 async def test_alert():
-    """
-    يجرّب SMS والمكالمة والبريد فوراً بحادثة وهمية، ويرجع نتيجة كل قناة
-    مع رمز الخطأ — بدل انتظار حادثة حرجة حقيقية لمعرفة سبب الفشل.
-    """
     sample = {
         "incident": {
             "id": "TEST-0000",
@@ -1527,7 +1466,6 @@ async def test_alert():
             "email 403 = عنوان المُرسِل غير موثّق في Twilio"
         ),
     }
-
 
 @app.get("/api/incidents/template/download")
 async def download_pdf_template():
@@ -1629,16 +1567,6 @@ async def upload_pdf(
     sha256: str = Form(None),
 ):
     data = await file.read()
-    extracted: dict = {}
-    text = ""
-    itype = "malware"
-    src_ip = None
-
-    # 1. التحقق من أن الملف المدخل هو PDF فعلاً
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a valid SentriX PDF report.")
-
-    data = await file.read()
     if len(data) == 0:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
@@ -1647,22 +1575,51 @@ async def upload_pdf(
     itype = "malware"
     src_ip = None
 
-    try:
-        import pdfplumber
-        tmp = FILES_DIR / f"_tmp_{uuid.uuid4()}.pdf"
-        tmp.write_bytes(data)
+    if file.filename.lower().endswith(".docx") or file.filename.lower().endswith(".docm"):
         try:
-            with pdfplumber.open(tmp) as pdf:
-                text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
-                # ... باقي كود الاستخراج كما هو ...
-        finally:
-            tmp.unlink(missing_ok=True)
-            
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse PDF file: {str(e)[:150]}")
+            extracted, text = extract_docx_pairs(data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse DOCX file: {str(e)[:150]}")
+    else:
+        try:
+            import pdfplumber
+            tmp = FILES_DIR / f"_tmp_{uuid.uuid4()}.pdf"
+            tmp.write_bytes(data)
+            try:
+                with pdfplumber.open(tmp) as pdf:
+                    text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+                    for page in pdf.pages:
+                        tables = page.extract_tables() or []
+                        for table in tables:
+                            for row in table:
+                                if len(row) >= 2:
+                                    k, v = row[0], row[1]
+                                    feature_key = _match_feature(k)
+                                    if feature_key and feature_key not in extracted:
+                                        num = _to_number(v)
+                                        if num is not None:
+                                            extracted[feature_key] = num
+            finally:
+                tmp.unlink(missing_ok=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse PDF file: {str(e)[:150]}")
+
+    lower_text = (text or "").lower()
+    for candidate in ("ransomware", "brute_force", "brute force", "ddos", "phishing", "malware", "insider_threat", "insider"):
+        if candidate in lower_text:
+            itype = candidate.replace(" ", "_")
+            break
+
+    for line in lower_text.splitlines():
+        if "source ip" in line or "src ip" in line:
+            parts = line.split(":")
+            if len(parts) > 1:
+                potential_ip = parts[1].strip().split()[0]
+                if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", potential_ip):
+                    src_ip = potential_ip
+                    break
 
     complete = features_complete(extracted)
-    lower_text = (text or "").lower()
 
     def pick(keys, options, default):
         for line in lower_text.splitlines():
@@ -1672,14 +1629,8 @@ async def upload_pdf(
                         return opt
         return default
 
-    # القيم الافتراضية كانت high/internet_facing/high/high، فأي ملف لا يُقرأ
-    # منه شيء يخرج بدرجة ~98 = Critical بينما النموذج لم يعمل أصلاً
-    # (فتظهر الحادثة Critical و"Pending" في صفحة التحليل معاً).
-    # الافتراضي الآن medium، ولا تُرفع القيم إلا إذا نصّ عليها التقرير.
-    asset_criticality = pick(["asset criticality", "criticality"],
-                            ["critical", "high", "medium", "low"], "medium")
-    exposure = pick(["exposure"], ["internet_facing", "internet facing", "dmz", "internal"],
-                    "internal")
+    asset_criticality = pick(["asset criticality", "criticality"], ["critical", "high", "medium", "low"], "medium")
+    exposure = pick(["exposure"], ["internet_facing", "internet facing", "dmz", "internal"], "internal")
     exposure = exposure.replace("internet facing", "internet_facing")
     vulnerability_level = pick(["vulnerability"], ["critical", "high", "medium", "low", "none"], "medium")
     business_impact = pick(["business impact", "impact"], ["critical", "high", "medium", "low"], "medium")
@@ -1696,10 +1647,7 @@ async def upload_pdf(
         source="PDF Report",
         input_method="pdf",
         source_ip=src_ip,
-        description=(
-            f"Ingested from PDF '{file.filename}'. "
-            f"{len(extracted)}/{len(FEATURE_KEYS)} network flow features extracted."
-        ),
+        description=f"Ingested from PDF '{file.filename}'. {len(extracted)}/{len(FEATURE_KEYS)} network flow features extracted.",
         asset_type=asset_type,
         asset_criticality=asset_criticality,
         exposure=exposure,
@@ -1716,10 +1664,7 @@ async def upload_pdf(
         "required_features": len(FEATURE_KEYS),
         "missing_features": missing[:10],
         "used_for_model": complete,
-        "reason": None if complete else (
-            f"{len(missing)} network flow feature(s) missing from the report — "
-            f"scored from organizational context only."
-        ),
+        "reason": None if complete else f"{len(missing)} network flow feature(s) missing from the report — scored from organizational context only.",
         "detected_incident_type": itype,
         "scoring_mode": result["risk"]["scoring_mode"],
         "severity": result["risk"]["severity"],
@@ -1732,6 +1677,7 @@ async def upload_pdf(
         "analyst": analyst,
     }
     return result
+
 # ===========================================================================
 # 9. TWILIO EMAIL, SMS & VOICE CALLS
 # ===========================================================================
@@ -1739,7 +1685,6 @@ async def upload_pdf(
 import requests
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
-
 
 def notify_email(pkg: dict) -> dict:
     global LAST_EMAIL
@@ -1753,8 +1698,8 @@ def notify_email(pkg: dict) -> dict:
             return result
 
         missing = [n for n, v in (("TWILIO_SID", TWILIO_SID), ("TWILIO_TOKEN", TWILIO_TOKEN),
-                                  ("TWILIO_FROM_EMAIL", TWILIO_FROM_EMAIL),
-                                  ("ALERT_EMAILS", ALERT_EMAILS)) if not v]
+                                 ("TWILIO_FROM_EMAIL", TWILIO_FROM_EMAIL),
+                                 ("ALERT_EMAILS", ALERT_EMAILS)) if not v]
         if missing:
             result = {"sent": False, "reason": f"missing_config: {', '.join(missing)}"}
             print(f"[email] skipped — {result['reason']}")
@@ -1781,20 +1726,14 @@ def notify_email(pkg: dict) -> dict:
             timeout=10
         )
         ok = response.status_code in (200, 201, 202)
-        if not ok:
-            print(f"[email] FAILED {response.status_code}: {response.text[:300]}")
-        else:
-            print(f"[email] sent to {', '.join(ALERT_EMAILS)} ({response.status_code})")
         result = {"sent": ok, "status": response.status_code,
                   "to": ALERT_EMAILS,
                   "error": None if ok else response.text[:300]}
     except Exception as e:
-        print(f"[email] FAILED: {type(e).__name__}: {e}")
         result = {"sent": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     LAST_EMAIL = result
     return result
-
 
 def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) -> dict:
     global LAST_TWILIO
@@ -1803,16 +1742,14 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
             return {"sent": False, "reason": "severity_not_critical"}
 
         missing = [n for n, v in (("TWILIO_SID", TWILIO_SID), ("TWILIO_TOKEN", TWILIO_TOKEN),
-                                  ("TWILIO_PHONE", TWILIO_PHONE)) if not v]
+                                 ("TWILIO_PHONE", TWILIO_PHONE)) if not v]
         if missing:
             reason = f"missing_config: {', '.join(missing)}"
-            print(f"[twilio] skipped — {reason}")
             return {"sent": False, "reason": reason}
 
         target_phones = TEAM_NUMBERS or []
         if not target_phones:
             reason = "missing_config: TEAM_NUMBERS is empty"
-            print(f"[twilio] skipped — {reason}")
             return {"sent": False, "reason": reason}
 
         client = Client(TWILIO_SID, TWILIO_TOKEN)
@@ -1821,19 +1758,15 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
         sms_body = f"SentriX Alert: Critical {incident_type} detected. ID: {ref}. Risk: {risk_score}."
 
         for target_phone in target_phones:
-            # 1. إرسال الرسالة النصية SMS
             try:
                 message = client.messages.create(to=target_phone, from_=TWILIO_PHONE, body=sms_body)
-                print(f"[twilio] sms sid={message.sid} to={target_phone} status={message.status}")
                 results.append({"type": "sms", "sent": True, "sid": message.sid,
                                 "status": message.status, "to": target_phone})
             except Exception as e:
                 code = getattr(e, "code", None)
-                print(f"[twilio] sms FAILED to={target_phone} code={code}: {e}")
                 results.append({"type": "sms", "sent": False, "code": code,
                                 "to": target_phone, "error": str(e)[:200]})
 
-            # 2. إجراء المكالمة ونطق تفاصيل الحادثة الحقيقية بصوت الآلة
             try:
                 response = VoiceResponse()
                 response.say(f"Attention. SentriX Security Alert. Critical {incident_type} detected. Incident reference {ref}. Risk score {risk_score}. Please check your dashboard immediately.", language="en-US", voice="alice")
@@ -1842,12 +1775,10 @@ def notify_twilio(ref: str, severity: str, incident_type: str, risk_score: int) 
                     to=target_phone,
                     from_=TWILIO_PHONE
                 )
-                print(f"[twilio] call sid={call.sid} to={target_phone} status={call.status}")
                 results.append({"type": "voice", "sent": True, "sid": call.sid,
                                 "status": call.status, "to": target_phone})
             except Exception as e:
                 code = getattr(e, "code", None)
-                print(f"[twilio] voice FAILED to={target_phone} code={code}: {e}")
                 results.append({"type": "voice", "sent": False, "code": code,
                                 "to": target_phone, "error": str(e)[:200]})
 
