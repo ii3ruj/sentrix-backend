@@ -871,11 +871,11 @@ async def crsi_assessment():
         day = today - timedelta(days=i)
         of_day = [p for p in PACKAGES if pkg_day(p) == day]
         
-        # حساب الـ CRSI حصرياً لحوادث هذا اليوم فقط لضمان اختلاف النسب ديناميكياً
+        # حساب الـ CRSI حصرياً لحوادث هذا اليوم فقط
         day_crsi = compute_crsi(of_day)
         
         if not of_day:
-            # محاكاة طفيفة واقعية للأيام الخالية من الحوادث لتتغير النسب
+            # محاكاة واقعية للأيام الخالية لضمان استمرار ظهور النسب
             base_score = 95.0 - (i * 1.5)
             dummy_breakdown = [
                 {"domain_key": k, "name": meta["name"], "score": base_score, "weight": meta["weight"],
@@ -897,7 +897,8 @@ async def crsi_assessment():
             "status": "Good" if score >= 70 else "Fair" if score >= 40 else "Poor",
             "maturity_level": maturity,
             "incident_count": len(of_day),
-            "breakdown": breakdown_list,
+            # نضمن هنا إرسال القائمة دائماً ولن تكون فارغة أبداً
+            "breakdown": breakdown_list if breakdown_list else compute_crsi([])["breakdown"],
         })
 
     latest = daily_history[0]
